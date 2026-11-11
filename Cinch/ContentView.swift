@@ -25,7 +25,18 @@ struct ContentView: View {
     @State private var isSaving: Bool = false
     @State private var saveProgress: Double = 0.0
     @State private var saveProgressText: String = ""
+    @State private var showingExtractErrorAlert: Bool = false // NEW: Extract Feature
+    @State private var extractErrorMessage: String? = nil // NEW: Extract Feature
     @Environment(AppModel.self) private var appModel
+
+    // New folder state
+    @State private var showNewFolderPrompt: Bool = false
+    @State private var newFolderName: String = "New Folder"
+
+    // --- RENAME FEATURE ---
+    @State private var showRenamePrompt: Bool = false
+    @State private var pendingRenameNode: ZipNode? = nil
+    @State private var newNodeName: String = ""
 
     @State private var sortOrder: [KeyPathComparator<ZipNode>] = [
         .init(\.name, order: .forward)
@@ -34,14 +45,222 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             VStack(alignment: .leading, spacing: 0) {
-                // Toolbar row across the top
-                HStack(spacing: 8) {
+                // Header: archive icon, name and location
+                HStack(spacing: 12) {
+                    Image(systemName: "doc.zipper")
+                        .font(.title2)
+                        .foregroundStyle(.tint)
+                        .symbolRenderingMode(.hierarchical)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(zipFileURL?.lastPathComponent ?? "No Archive Open")
+                            .font(.title3.weight(.semibold))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        if let url = zipFileURL {
+                            Text(url.deletingLastPathComponent().path)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.head)
+                        }
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 10)
+
+                // Inline, dismissible error banner
+                if let errorMessage = zipReadError {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.yellow)
+                        Text(errorMessage)
+                            .lineLimit(2)
+                        Spacer(minLength: 8)
+                        Button {
+                            zipReadError = nil
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Dismiss")
+                    }
+                    .font(.callout)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(.red.opacity(0.08))
+                    .overlay(alignment: .top) { Divider() }
+                    .overlay(alignment: .bottom) { Divider() }
+                }
+
+                Divider()
+
+                // Main content: list like Finder
+                if zipNodes.isEmpty {
+                    VStack(spacing: 16) {
+                        Image(systemName: "doc.zipper")
+                            .font(.system(size: 56, weight: .light))
+                            .foregroundStyle(.tertiary)
+                            .symbolRenderingMode(.hierarchical)
+                        Text(zipFileURL != nil ? "This Archive Is Empty" : "No Archive Open")
+                            .font(.title2.weight(.semibold))
+                        Text(zipFileURL != nil
+                             ? "Add files, drop them anywhere in the window, or create a folder."
+                             : "Create a new zip archive or open an existing one to get started.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                        HStack(spacing: 12) {
+                            if zipFileURL == nil {
+                                Button {
+                                    Task { await createNewZip() }
+                                } label: {
+                                    Label("New Archive", systemImage: "doc.badge.plus")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                Button {
+                                    presentOpenPanel()
+                                } label: {
+                                    Label("Open…", systemImage: "folder")
+                                }
+                                .buttonStyle(.bordered)
+                            } else {
+                                Button {
+                                    presentAddFilesPanel()
+                                } label: {
+                                    Label("Add Files…", systemImage: "plus")
+                                }
+                                .buttonStyle(.borderedProminent)
+                            }
+                        }
+                    }
+                    .padding(32)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    #if canImport(AppKit)
+                    MultiColumnOutlineView(
+                        roots: zipNodes,
+                        selected: Binding(get: { selectedNode }, set: { selectedNode = $0 }),
+                        onRemove: { removeSelectedEntry() },
+                        onSelect: { node in
+                            selectedNode = node
+                        }
+                    )
+                    // NEW: Drag and Drop Add - add onDrop modifier
+                    .onDrop(of: [UTType.fileURL.identifier], isTargeted: nil) { providers in
+                        guard zipFileURL != nil else { return false }
+                        Task {
+                            await handleDroppedProvidersAsync(providers)
+                        }
+                        return true
+                    }
+                    // NEW: Context menu for Add Folder on directories and Rename option for any node
+                    .contextMenu {
+                        if let selected = selectedNode {
+                            if selected.isDirectory {
+                                Button("Add Folder…") {
+                                    showNewFolderPrompt = true
+                                }
+                            }
+                            Button("Rename") {
+                                pendingRenameNode = selected
+                                newNodeName = selected.name
+                                showRenamePrompt = true
+                            }
+                        }
+                    }
+                    #else
+                    Text("Multi-column outline is only available on macOS.")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    #endif
+                }
+
+                // Optional preview below list
+                if let node = selectedNode, zipFileURL != nil, node.isDirectory == false {
+                    Divider()
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "eye")
+                                .font(.caption2)
+                            Text(node.name)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.top, 8)
+                        .padding(.bottom, 4)
+                        self.previewForZipEntry(url: zipFileURL!, node: node)
+                            .frame(maxWidth: .infinity, maxHeight: 260, alignment: .topLeading)
+                    }
+                    .background(.thinMaterial)
+                }
+
+                // Status bar
+                Divider()
+                HStack(spacing: 16) {
+                    Text("\(zipNodes.count) item\(zipNodes.count == 1 ? "" : "s")")
+                    if let total = totalUncompressedSize {
+                        Text(ByteCountFormatter.string(fromByteCount: total, countStyle: .file))
+                            .monospacedDigit()
+                    }
+                    Spacer()
+                    if let url = zipFileURL {
+                        Text(url.path)
+                            .lineLimit(1)
+                            .truncationMode(.head)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.bar)
+            }
+            .toolbar {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Button {
+                        Task { await createNewZip() }
+                    } label: {
+                        Label("New", systemImage: "doc.badge.plus")
+                    }
+                    .help("Create a new zip archive")
+
+                    Button {
+                        presentOpenPanel()
+                    } label: {
+                        Label("Open", systemImage: "folder")
+                    }
+                    .help("Open an existing zip archive")
+
                     Button {
                         if zipFileURL != nil { presentAddFilesPanel() }
                     } label: {
-                        Label("Add", systemImage: "plus")
+                        Label("Add Files", systemImage: "plus")
                     }
                     .disabled(zipFileURL == nil)
+                    .help("Add files to the archive")
+
+                    Button {
+                        showNewFolderPrompt = true
+                    } label: {
+                        Label("Add Folder", systemImage: "folder.badge.plus")
+                    }
+                    .disabled(zipFileURL == nil)
+                    .help("Add a new folder to the archive")
+
+                    Button {
+                        Task { await extractSelectedEntry() }
+                    } label: {
+                        Label("Extract", systemImage: "square.and.arrow.up")
+                    }
+                    .disabled(selectedNode == nil || zipFileURL == nil)
+                    .help("Extract the selected entry")
 
                     Button {
                         Task { await repackCurrentZipWithProgress() }
@@ -49,15 +268,15 @@ struct ContentView: View {
                         Label("Save", systemImage: "tray.and.arrow.down")
                     }
                     .disabled(zipFileURL == nil)
+                    .help("Save changes to the archive")
 
-                    Button {
+                    Button(role: .destructive) {
                         removeSelectedEntry()
                     } label: {
                         Label("Remove", systemImage: "trash")
                     }
                     .disabled(selectedNode == nil || zipFileURL == nil)
-
-                    Spacer()
+                    .help("Remove the selected entry")
 
                     Button {
                         // Close current zip
@@ -69,80 +288,14 @@ struct ContentView: View {
                         Label("Close", systemImage: "xmark.circle")
                     }
                     .disabled(zipFileURL == nil)
-                }
-                .padding(8)
-                .background(.bar)
-
-                Divider()
-
-                // Title / path row
-                HStack {
-                    Text(zipFileURL?.lastPathComponent ?? "No Zip Opened")
-                        .font(.headline)
-                    Spacer()
-                    Button("Open Zip…") { presentOpenPanel() }
-                        .keyboardShortcut("o", modifiers: [.command])
-                }
-                .padding([.horizontal, .top], 8)
-                .padding(.bottom, 4)
-
-                // Main content: list like Finder
-                if zipNodes.isEmpty {
-                    VStack(spacing: 8) {
-                        Text("No Zip Opened")
-                            .foregroundStyle(.secondary)
-                        Text("Use Open Zip… to choose a .zip file.")
-                            .foregroundStyle(.tertiary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    Table(currentListingNodes(), sortOrder: $sortOrder) {
-                        TableColumn("Name", value: \.name) { node in
-                            HStack {
-                                Image(systemName: node.isDirectory ? "folder" : "doc")
-                                Text(node.name)
-                            }
-                        }
-                        TableColumn("Size") { node in
-                            if let size = node.size, !node.isDirectory {
-                                Text(bytesString(size))
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                Text("--").foregroundStyle(.tertiary)
-                            }
-                        }
-                        TableColumn("Date Modified") { node in
-                            if let date = node.modificationDate {
-                                Text(date.formatted(date: .numeric, time: .shortened))
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                Text("--").foregroundStyle(.tertiary)
-                            }
-                        }
-                    }
-                    .contextMenu {
-                        if let node = selectedNode, !node.isDirectory {
-                            Button("Remove") { removeSelectedEntry() }
-                        }
-                    }
-                }
-
-                // Optional preview below list
-                if let node = selectedNode, zipFileURL != nil, node.isDirectory == false {
-                    Divider()
-                    self.previewForZipEntry(url: zipFileURL!, node: node)
-                        .frame(maxWidth: .infinity, maxHeight: 280, alignment: .topLeading)
-                        .background(.thinMaterial)
+                    .help("Close the current archive")
                 }
             }
             .onChange(of: appModel.intent) { _, newValue in
                 guard let intent = newValue else { return }
                 switch intent {
                 case .newDocument:
-                    zipFileURL = nil
-                    zipNodes = []
-                    selectedNode = nil
-                    zipReadError = nil
+                    Task { await createNewZip() } // NEW: New Zip Creation // FIX: Added missing await to async call
                 case .open:
                     presentOpenPanel()
                 case .saveAs:
@@ -158,21 +311,285 @@ struct ContentView: View {
             }
 
             if isSaving {
-                Color.black.opacity(0.2).ignoresSafeArea()
-                VStack(spacing: 12) {
-                    let label = Text("Saving…")
-                    let current = Text(saveProgressText)
-                    ProgressView(value: saveProgress, label: { label }, currentValueLabel: { current })
-                        .frame(width: 260)
-                    Button("Cancel") { /* no-op for now */ }
-                        .disabled(true)
-                        .opacity(0.5)
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+                    .ignoresSafeArea()
+                VStack(spacing: 16) {
+                    ProgressView(value: saveProgress) {
+                        Text("Saving…")
+                            .font(.headline)
+                    } currentValueLabel: {
+                        Text(saveProgressText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .frame(width: 280)
                 }
-                .padding(20)
-                .background(RoundedRectangle(cornerRadius: 12).fill(.background))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary))
-                .shadow(radius: 8)
+                .padding(28)
+                .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.regularMaterial))
+                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(.quaternary, lineWidth: 1))
+                .shadow(color: .black.opacity(0.2), radius: 24, y: 8)
             }
+        }
+        // NEW: Extract Feature - Alert for extraction errors
+        .alert("Extraction Failed", isPresented: $showingExtractErrorAlert, actions: {
+            Button("OK", role: .cancel) { }
+        }, message: {
+            Text(extractErrorMessage ?? "Unknown error")
+        })
+        // New Folder Alert with text field
+        .alert("New Folder", isPresented: $showNewFolderPrompt, actions: {
+            TextField("Folder Name", text: $newFolderName)
+            Button("Add") {
+                Task {
+                    await addNewFolder(toParent: (selectedNode?.isDirectory == true) ? selectedNode : nil)
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        }, message: {
+            Text("Enter a name for the new folder.")
+        })
+        // --- RENAME FEATURE ---
+        .alert("Rename Entry", isPresented: $showRenamePrompt, actions: {
+            TextField("New Name", text: $newNodeName)
+            Button("Rename") {
+                guard let node = pendingRenameNode else { return }
+                Task {
+                    await renameZipNode(node, to: newNodeName)
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingRenameNode = nil
+                newNodeName = ""
+            }
+        }, message: {
+            Text("Enter a new name for \"\(pendingRenameNode?.name ?? "")\".")
+        })
+    }
+
+    // NEW: Extract Feature - Extract selected entry
+    @MainActor
+    private func extractSelectedEntry() async {
+        #if canImport(AppKit)
+        guard let zipURL = zipFileURL, let node = selectedNode else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Select Destination Folder"
+        panel.title = "Extract To Folder"
+        panel.begin { response in
+            if response == .OK, let destinationURL = panel.url {
+                do {
+                    guard let archive = Archive(url: zipURL, accessMode: .read) else {
+                        setExtractError("Could not open archive for reading.")
+                        return
+                    }
+                    if node.isDirectory {
+                        // Extract all entries under this directory
+                        let prefix = node.fullPath.hasSuffix("/") ? node.fullPath : node.fullPath + "/"
+                        for entry in archive {
+                            if entry.path == prefix || entry.path.hasPrefix(prefix) {
+                                try archive.extract(entry, to: destinationURL.appendingPathComponent(entry.path))
+                            }
+                        }
+                    } else {
+                        // Extract single file
+                        if let entry = archive.first(where: { $0.path == node.fullPath }) {
+                            try archive.extract(entry, to: destinationURL.appendingPathComponent(entry.path))
+                        } else {
+                            setExtractError("Selected file not found in archive.")
+                            return
+                        }
+                    }
+                } catch {
+                    setExtractError(error.localizedDescription)
+                }
+            }
+        }
+        #endif
+    }
+
+    // NEW: Extract Feature - Helper to set and show extract error alert
+    @MainActor
+    private func setExtractError(_ message: String) {
+        extractErrorMessage = message
+        showingExtractErrorAlert = true
+    }
+
+    // NEW: New Zip Creation
+    @MainActor
+    private func createNewZip() async {
+        #if canImport(AppKit)
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType.zip]
+        panel.nameFieldStringValue = "NewArchive.zip"
+        panel.canCreateDirectories = true
+        panel.title = "Create New ZIP Archive"
+        panel.prompt = "Create"
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                do {
+                    // Create empty archive
+                    let fm = FileManager.default
+                    if fm.fileExists(atPath: url.path) {
+                        try fm.removeItem(at: url)
+                    }
+                    guard let archive = Archive(url: url, accessMode: .create) else {
+                        zipReadError = "Failed to create archive at \(url.path)"
+                        return
+                    }
+                    // No entries added, empty archive created
+                    DispatchQueue.main.async {
+                        zipFileURL = url
+                        zipNodes = []
+                        selectedNode = nil
+                        zipReadError = nil
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        zipReadError = "Failed to create new zip: \(error.localizedDescription)"
+                    }
+                }
+            }
+        }
+        #else
+        // Fallback for other platforms: clear state
+        zipFileURL = nil
+        zipNodes = []
+        selectedNode = nil
+        zipReadError = nil
+        #endif
+    }
+
+    // NEW: RENAME FEATURE - Rename node (file or folder) in the zip
+    @MainActor
+    private func renameZipNode(_ node: ZipNode, to newName: String) async {
+        guard let zipURL = zipFileURL else { return }
+        let trimmedName = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            zipReadError = "Name cannot be empty."
+            return
+        }
+        // Validate newName does not contain "/" or backslash or ":" etc.
+        let invalidCharacters = CharacterSet(charactersIn: "/\\:")
+        if trimmedName.rangeOfCharacter(from: invalidCharacters) != nil {
+            zipReadError = "Name contains invalid characters."
+            return
+        }
+
+        do {
+            guard let archive = Archive(url: zipURL, accessMode: .update) else {
+                zipReadError = "Failed to open archive for update."
+                return
+            }
+
+            // Determine parent path prefix (folder path)
+            let oldFullPath = node.fullPath
+            let parentPath: String
+            if let lastSlashIndex = oldFullPath.lastIndex(of: "/"), node.isDirectory == false {
+                // Use string.index(_:offsetBy:) to get index after last slash
+                let idx = oldFullPath.index(lastSlashIndex, offsetBy: 1)
+                parentPath = String(oldFullPath[..<idx]) // include slash
+            } else if node.isDirectory {
+                // For directory, the fullPath ends with "/"
+                // Remove last component + slash
+                var path = oldFullPath
+                if path.hasSuffix("/") {
+                    path.removeLast()
+                }
+                if let lastSlashIndex = path.lastIndex(of: "/") {
+                    let idx = path.index(lastSlashIndex, offsetBy: 1)
+                    parentPath = String(path[..<idx])
+                } else {
+                    parentPath = ""
+                }
+            } else {
+                // No parent folder
+                parentPath = ""
+            }
+
+            let newFullPath: String
+            if node.isDirectory {
+                newFullPath = parentPath + trimmedName + "/"
+            } else {
+                newFullPath = parentPath + trimmedName
+            }
+
+            // Check if new name already exists in archive
+            if archive.contains(where: { $0.path == newFullPath }) {
+                zipReadError = "An entry with the new name already exists."
+                return
+            }
+
+            if node.isDirectory {
+                // Rename folder: copy all entries under oldFullPath prefix to newFullPath prefix, then remove old entries
+                let prefix = oldFullPath.hasSuffix("/") ? oldFullPath : oldFullPath + "/"
+                let newPrefix = newFullPath
+
+                var entriesToRename: [ZIPFoundation.Entry] = []
+                for entry in archive {
+                    if entry.path == prefix || entry.path.hasPrefix(prefix) {
+                        entriesToRename.append(entry)
+                    }
+                }
+
+                // Copy entries with new paths
+                for entry in entriesToRename {
+                    let relativePath = String(entry.path.dropFirst(prefix.count))
+                    let targetPath = newPrefix + relativePath
+                    // Check target path doesn't exist (should not due to above check, but be safe)
+                    if archive.contains(where: { $0.path == targetPath }) {
+                        zipReadError = "Conflict while renaming entries."
+                        return
+                    }
+                    // Extract data for entry
+                    var entryData = Data()
+                    try archive.extract(entry) { chunk in
+                        entryData.append(chunk)
+                    }
+                    // Add new entry with same attributes
+                    // FIX: Use minimal addEntry signature WITHOUT compressionMethod property to avoid build errors
+                    try archive.addEntry(with: targetPath, type: entry.type, uncompressedSize: UInt32(entryData.count), provider: { position, size in
+                        let start = Int(position)
+                        let end = min(start + Int(size), entryData.count)
+                        return entryData.subdata(in: start..<end)
+                    })
+                }
+                // Remove old entries
+                for entry in entriesToRename {
+                    try archive.remove(entry)
+                }
+            } else {
+                // Rename single file entry
+                guard let oldEntry = archive.first(where: { $0.path == oldFullPath }) else {
+                    zipReadError = "Original file entry not found."
+                    return
+                }
+                // Extract data
+                var data = Data()
+                try archive.extract(oldEntry) { chunk in
+                    data.append(chunk)
+                }
+                // Add new entry
+                // FIX: Use minimal addEntry signature WITHOUT compressionMethod property to avoid build errors
+                try archive.addEntry(with: newFullPath, type: oldEntry.type, uncompressedSize: UInt32(data.count), provider: { position, size in
+                    let start = Int(position)
+                    let end = min(start + Int(size), data.count)
+                    return data.subdata(in: start..<end)
+                })
+                // Remove old entry
+                try archive.remove(oldEntry)
+            }
+
+            // Refresh tree and clear rename state
+            zipNodes = try readZipNodes(url: zipURL)
+            selectedNode = nil
+            pendingRenameNode = nil
+            newNodeName = ""
+        } catch {
+            zipReadError = "Rename failed: \(error.localizedDescription)"
         }
     }
 
@@ -262,11 +679,66 @@ struct ContentView: View {
         panel.begin { response in
             if response == .OK {
                 for url in panel.urls {
-                    addFileToZip(zipURL: zipFileURL!, fileURL: url)
+                    if let selected = selectedNode, selected.isDirectory {
+                        addFileToZip(zipURL: zipFileURL!, fileURL: url, atPath: selected.fullPath)
+                    } else {
+                        addFileToZip(zipURL: zipFileURL!, fileURL: url, atPath: nil)
+                    }
                 }
             }
         }
         #endif
+    }
+
+    // Add new folder entry to zip, in optional parent folder
+    @MainActor
+    private func addNewFolder(toParent parentNode: ZipNode?) async {
+        guard let zipURL = zipFileURL else { return }
+        guard let archive = Archive(url: zipURL, accessMode: .update) else { return }
+        let folderName = newFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !folderName.isEmpty else { return }
+        // Compose full path for the new folder (always end with "/")
+        var folderPath: String
+        if let parent = parentNode {
+            let prefix = parent.fullPath.hasSuffix("/") ? parent.fullPath : parent.fullPath + "/"
+            folderPath = prefix + folderName + "/"
+        } else {
+            folderPath = folderName + "/"
+        }
+        do {
+            // Add directory entry with empty data
+            // FIX: supply the full parameter list to resolve the ambiguous addEntry overload
+            try archive.addEntry(
+                with: folderPath,
+                type: .directory,
+                uncompressedSize: Int64(0),
+                modificationDate: Date(),
+                permissions: nil,
+                compressionMethod: .none,
+                bufferSize: 65536,
+                progress: nil,
+                provider: { _, _ in
+                    return Data()
+                }
+            )
+            // Refresh tree
+            zipNodes = try readZipNodes(url: zipURL)
+            selectedNode = nil
+            newFolderName = "New Folder"
+        } catch {
+            zipReadError = "Failed to add folder: \(error.localizedDescription)"
+        }
+    }
+
+    // Total uncompressed size of all file entries, for the status bar
+    private var totalUncompressedSize: Int64? {
+        guard !zipNodes.isEmpty else { return nil }
+        func sum(_ nodes: [ZipNode]) -> Int64 {
+            nodes.reduce(0) { acc, node in
+                acc + (node.size ?? 0) + (node.children.map(sum) ?? 0)
+            }
+        }
+        return sum(zipNodes)
     }
 
     // Compute current listing; for now we show top-level entries
@@ -364,14 +836,16 @@ struct ContentView: View {
             }
             for entry in readArchive {
                 // Copy entries by streaming
+                var entryData = Data()
                 try readArchive.extract(entry) { data in
-                    try writeArchive.addEntry(with: entry.path, type: entry.type, uncompressedSize: UInt32(data.count), compressionMethod: .deflate, provider: { position, size in
-                        // For simplicity, provide full data slice per request
-                        let start = Int(position)
-                        let end = min(start + Int(size), data.count)
-                        return data.subdata(in: start..<end)
-                    })
+                    entryData.append(data)
                 }
+                // FIX: Use minimal addEntry signature WITHOUT compressionMethod property to avoid build errors
+                try writeArchive.addEntry(with: entry.path, type: entry.type, uncompressedSize: UInt32(entryData.count), provider: { position, size in
+                    let start = Int(position)
+                    let end = min(start + Int(size), entryData.count)
+                    return entryData.subdata(in: start..<end)
+                })
             }
             // Atomically replace original
             if fm.fileExists(atPath: sourceURL.path) {
@@ -410,14 +884,16 @@ struct ContentView: View {
             }
             for entry in readArchive {
                 // Copy entries by streaming
+                var entryData = Data()
                 try readArchive.extract(entry) { data in
-                    try writeArchive.addEntry(with: entry.path, type: entry.type, uncompressedSize: UInt32(data.count), compressionMethod: .deflate, provider: { position, size in
-                        // For simplicity, provide full data slice per request
-                        let start = Int(position)
-                        let end = min(start + Int(size), data.count)
-                        return data.subdata(in: start..<end)
-                    })
+                    entryData.append(data)
                 }
+                // FIX: Use minimal addEntry signature WITHOUT compressionMethod property to avoid build errors
+                try writeArchive.addEntry(with: entry.path, type: entry.type, uncompressedSize: UInt32(entryData.count), provider: { position, size in
+                    let start = Int(position)
+                    let end = min(start + Int(size), entryData.count)
+                    return entryData.subdata(in: start..<end)
+                })
             }
             // Atomically replace original
             if fm.fileExists(atPath: sourceURL.path) {
@@ -433,12 +909,25 @@ struct ContentView: View {
         }
     }
 
+    // NEW: Drag and Drop Add - handle files and directories dropped
     private func handleDroppedProvidersAsync(_ providers: [NSItemProvider]) async {
         for provider in providers {
             if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
                 if let url = await loadURL(from: provider) {
-                    await loadZip(at: url)
-                    return
+                    var isDir: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) {
+                        if isDir.boolValue {
+                            // Add folder recursively
+                            await addFolderToZip(url)
+                        } else {
+                            if let selected = selectedNode, selected.isDirectory {
+                                addFileToZip(zipURL: zipFileURL!, fileURL: url, atPath: selected.fullPath)
+                            } else {
+                                addFileToZip(zipURL: zipFileURL!, fileURL: url, atPath: nil)
+                            }
+                        }
+                        return
+                    }
                 }
             } else if provider.hasItemConformingToTypeIdentifier(UTType.zip.identifier) {
                 if let url = await loadURL(from: provider) {
@@ -477,15 +966,55 @@ struct ContentView: View {
         }
     }
 
-    private func addFileToZip(zipURL: URL, fileURL: URL) {
+    // Add file to zip at optional path prefix
+    private func addFileToZip(zipURL: URL, fileURL: URL, atPath pathPrefix: String?) {
         guard let archive = Archive(url: zipURL, accessMode: .update) else { return }
         let fileName = fileURL.lastPathComponent
+        let targetPath: String
+        if let prefix = pathPrefix {
+            let normalizedPrefix = prefix.hasSuffix("/") ? prefix : prefix + "/"
+            targetPath = normalizedPrefix + fileName
+        } else {
+            targetPath = fileName
+        }
         do {
-            try archive.addEntry(with: fileName, relativeTo: fileURL.deletingLastPathComponent())
+            // FIX: Use minimal addEntry signature WITHOUT compressionMethod property to avoid build errors
+            try archive.addEntry(with: targetPath, relativeTo: fileURL.deletingLastPathComponent())
             // refresh tree
             zipNodes = try readZipNodes(url: zipURL)
         } catch {
             zipReadError = "Failed to add file: \(error.localizedDescription)"
+        }
+    }
+
+    // NEW: Drag and Drop Add - Add folder recursively to zip
+    private func addFolderToZip(_ folderURL: URL) async {
+        guard let zipURL = zipFileURL else { return }
+        guard let archive = Archive(url: zipURL, accessMode: .update) else { return }
+        let fm = FileManager.default
+
+        let enumerator = fm.enumerator(at: folderURL, includingPropertiesForKeys: nil)
+        do {
+            while let item = enumerator?.nextObject() as? URL {
+                var isDir: ObjCBool = false
+                if fm.fileExists(atPath: item.path, isDirectory: &isDir) {
+                    if isDir.boolValue {
+                        // ZIP format stores directories implicitly by entries with trailing slash
+                        // We can skip explicit directory entries as ZIPFoundation does not require them
+                        continue
+                    } else {
+                        // Compute relative path from the folderURL's parent directory to preserve folder structure
+                        let relativePath = item.path.replacingOccurrences(of: folderURL.deletingLastPathComponent().path + "/", with: "")
+                        // Add file entry with relative path to preserve subfolder structure
+                        // FIX: Use minimal addEntry signature WITHOUT compressionMethod property to avoid build errors
+                        try archive.addEntry(with: relativePath, relativeTo: folderURL.deletingLastPathComponent())
+                    }
+                }
+            }
+            // Refresh tree after adding folder contents
+            zipNodes = try readZipNodes(url: zipURL)
+        } catch {
+            zipReadError = "Failed to add folder to zip: \(error.localizedDescription)"
         }
     }
 }
@@ -531,7 +1060,10 @@ func readZipNodes(url: URL) throws -> [ZipNode] {
         let modDate: Date? = entry.fileAttributes[.modificationDate] as? Date
         insertEntry(pathComponents, entry: entry, root: &root, fullPath: entry.path, size: size, modificationDate: modDate)
     }
-    return root.values.sorted(by: { $0.name < $1.name })
+    return root.values.sorted { a, b in
+        if a.isDirectory != b.isDirectory { return a.isDirectory && !b.isDirectory }
+        return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+    }
 }
 
 func insertEntry(_ components: [String], entry: ZIPFoundation.Entry, root: inout [String: ZipNode], fullPath: String, size: Int64?, modificationDate: Date?) {
@@ -552,8 +1084,10 @@ func insertEntry(_ components: [String], entry: ZIPFoundation.Entry, root: inout
         var nextChildren = folder.children ?? []
         var childrenDict = Dictionary(uniqueKeysWithValues: nextChildren.map { ($0.name, $0) })
         insertEntry(Array(components.dropFirst()), entry: entry, root: &childrenDict, fullPath: fullPath, size: size, modificationDate: modificationDate)
-        folder.children = childrenDict.values.sorted(by: { $0.name < $1.name })
+        folder.children = childrenDict.values.sorted { a, b in
+            if a.isDirectory != b.isDirectory { return a.isDirectory && !b.isDirectory }
+            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+        }
         root[first] = folder
     }
 }
-

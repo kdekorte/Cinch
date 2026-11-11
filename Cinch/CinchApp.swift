@@ -28,7 +28,7 @@ struct CinchApp: App {
         }
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("New") { appModel.intent = .newDocument }
+                Button("New Zip Archive") { appModel.intent = .newDocument } // NEW: New Zip Creation
                     .keyboardShortcut("n", modifiers: [.command])
 
                 Button("Open…") { appModel.intent = .open }
@@ -54,4 +54,3 @@ struct CinchApp: App {
         }
     }
 }
-
