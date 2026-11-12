@@ -22,7 +22,6 @@ struct MultiColumnOutlineView: NSViewRepresentable {
     private let roots: [ZipNode]
     private let onRemove: () -> Void
     private let onSelect: (ZipNode?) -> Void
-    private let onCreateZip: () -> Void
     // DRAG-IN SUPPORT: dropped file URLs, plus the folder node they were dropped onto (if any)
     private let onDropFiles: ([URL], ZipNode?) -> Void
     // INTERNAL MOVE SUPPORT: nodes dragged within the outline, plus the target folder (nil = root)
@@ -40,7 +39,6 @@ struct MultiColumnOutlineView: NSViewRepresentable {
         selected: Binding<ZipNode?>,
         onRemove: @escaping () -> Void,
         onSelect: @escaping (ZipNode?) -> Void,
-        onCreateZip: @escaping () -> Void = {},
         onDropFiles: @escaping ([URL], ZipNode?) -> Void = { _, _ in },
         onMoveNodes: @escaping ([ZipNode], ZipNode?) -> Void = { _, _ in },
         onCreateFolder: @escaping (ZipNode?) -> Void = { _ in },
@@ -50,7 +48,6 @@ struct MultiColumnOutlineView: NSViewRepresentable {
         self._selected = selected
         self.onRemove = onRemove
         self.onSelect = onSelect
-        self.onCreateZip = onCreateZip
         self.onDropFiles = onDropFiles
         self.onMoveNodes = onMoveNodes
         self.onCreateFolder = onCreateFolder
@@ -121,20 +118,6 @@ struct MultiColumnOutlineView: NSViewRepresentable {
 
         // Sorting
         outlineView.sortDescriptors = [NSSortDescriptor(key: "name", ascending: true)]
-        
-        if let mainMenu = NSApplication.shared.mainMenu,
-           let fileMenuItem = mainMenu.items.first(where: { $0.submenu?.title == "File" || $0.title == "File" }),
-           let fileSubmenu = fileMenuItem.submenu {
-            // Avoid adding duplicate menu items by checking for an existing one by action
-            let exists = fileSubmenu.items.contains(where: { $0.action == #selector(Coordinator.newZipMenuAction(_:)) })
-            if !exists {
-                fileSubmenu.addItem(NSMenuItem.separator())
-                let item = NSMenuItem(title: "New Zip…", action: #selector(Coordinator.newZipMenuAction(_:)), keyEquivalent: "n")
-                item.keyEquivalentModifierMask = [.command, .shift]
-                item.target = context.coordinator
-                fileSubmenu.addItem(item)
-            }
-        }
 
         return scrollView
     }
@@ -522,10 +505,6 @@ struct MultiColumnOutlineView: NSViewRepresentable {
                 menu.addItem(deleteItem)
             }
 
-            menu.addItem(NSMenuItem.separator())
-            let newZipItem = NSMenuItem(title: "New Zip…", action: #selector(newZipAction(_:)), keyEquivalent: "")
-            newZipItem.target = self
-            menu.addItem(newZipItem)
             return menu
         }
 
@@ -546,14 +525,6 @@ struct MultiColumnOutlineView: NSViewRepresentable {
 
         @objc private func removeAction(_ sender: NSMenuItem) {
             parent().onRemove()
-        }
-
-        @objc private func newZipAction(_ sender: NSMenuItem) {
-            parent().onCreateZip()
-        }
-
-        @objc func newZipMenuAction(_ sender: NSMenuItem) {
-            parent().onCreateZip()
         }
 
         // MARK: Sorting
@@ -900,7 +871,6 @@ struct MultiColumnOutlineView: View {
         selected: Binding<ZipNode?>,
         onRemove: @escaping () -> Void,
         onSelect: @escaping (ZipNode?) -> Void,
-        onCreateZip: @escaping () -> Void = {},
         onDropFiles: @escaping ([URL], ZipNode?) -> Void = { _, _ in },
         onMoveNodes: @escaping ([ZipNode], ZipNode?) -> Void = { _, _ in },
         onCreateFolder: @escaping (ZipNode?) -> Void = { _ in },
