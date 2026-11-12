@@ -69,6 +69,24 @@
 				<string>tgz</string>
 			</array>
 		</dict>
+		<!-- .tar.gz files are typed by their final .gz extension, so the gz UTI
+		     needs to be claimed as well (as an alternate viewer) -->
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Gzip Compressed Tar</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>org.gnu.gnu-zip-archive</string>
+			</array>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>gz</string>
+			</array>
+		</dict>
 		<!-- Other zip-format containers ZIPFoundation can open -->
 		<dict>
 			<key>CFBundleTypeName</key>
