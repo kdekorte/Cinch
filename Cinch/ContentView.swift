@@ -149,8 +149,10 @@ struct ContentView: View {
                             selectedNode = node
                         },
                         onDropFiles: { urls, targetFolder in
+                            // Copy now, while the drop's sandbox grant is still valid
+                            let staged = stageDroppedFiles(urls)
                             Task { @MainActor in
-                                for url in urls {
+                                for url in staged {
                                     await ingestURL(url, into: targetFolder)
                                 }
                             }
@@ -931,6 +933,33 @@ struct ContentView: View {
             // Cleanup temp on failure
             try? fm.removeItem(at: tempURL)
         }
+    }
+
+    // NEW: Drag and Drop Add - stage dropped files into our temp container.
+    // The App Sandbox only grants access to drag-dropped URLs during the drop
+    // operation itself, so we must copy them synchronously (inside the drop
+    // callback) before deferring the zip work to a Task.
+    private func stageDroppedFiles(_ urls: [URL]) -> [URL] {
+        let fm = FileManager.default
+        let stagingDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("CinchDropStaging-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try fm.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+        } catch {
+            ContentView.dropLogger.error("stageDroppedFiles: could not create staging dir: \(error.localizedDescription, privacy: .public)")
+            return []
+        }
+        var staged: [URL] = []
+        for url in urls {
+            let dest = stagingDir.appendingPathComponent(url.lastPathComponent)
+            do {
+                try fm.copyItem(at: url, to: dest)
+                staged.append(dest)
+            } catch {
+                ContentView.dropLogger.error("stageDroppedFiles: could not copy \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        return staged
     }
 
     // NEW: Drag and Drop Add + Paste - shared ingestion for a single file/folder URL
