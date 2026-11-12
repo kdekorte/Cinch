@@ -43,6 +43,20 @@ struct ContentView: View {
         .init(\.name, order: .forward)
     ]
 
+    // Formats Cinch can open: zip plus tar / tar.gz / tgz
+    static let openableContentTypes: [UTType] = [
+        .zip,
+        .gzip,
+        UTType("public.tar-archive") ?? .data,
+        UTType(filenameExtension: "tar") ?? .data,
+        UTType(filenameExtension: "tgz") ?? .gzip,
+        UTType(filenameExtension: "tar.gz") ?? .gzip,
+    ]
+
+    static func isArchiveURL(_ url: URL) -> Bool {
+        url.pathExtension.lowercased() == "zip" || TarArchive.isTarURL(url)
+    }
+
     var body: some View {
         ZStack {
             VStack(alignment: .leading, spacing: 0) {
@@ -413,6 +427,30 @@ struct ContentView: View {
         panel.begin { response in
             if response == .OK, let destinationURL = panel.url {
                 do {
+                    // tar archives: write entry data directly to the destination
+                    if TarArchive.isTarURL(zipURL) {
+                        let fm = FileManager.default
+                        let entries = try TarArchive.read(url: zipURL)
+                        if node.isDirectory {
+                            let prefix = node.fullPath.hasSuffix("/") ? node.fullPath : node.fullPath + "/"
+                            for entry in entries where entry.path == prefix || entry.path.hasPrefix(prefix) {
+                                let dest = destinationURL.appendingPathComponent(entry.path)
+                                if entry.isDirectory {
+                                    try fm.createDirectory(at: dest, withIntermediateDirectories: true)
+                                } else {
+                                    try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+                                    try entry.data.write(to: dest)
+                                }
+                            }
+                        } else if let entry = entries.first(where: { $0.path == node.fullPath }) {
+                            let dest = destinationURL.appendingPathComponent(entry.path)
+                            try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+                            try entry.data.write(to: dest)
+                        } else {
+                            setExtractError("Selected file not found in archive.")
+                        }
+                        return
+                    }
                     guard let archive = try? Archive(url: zipURL, accessMode: .read, pathEncoding: nil) else {
                         setExtractError("Could not open archive for reading.")
                         return
@@ -548,6 +586,32 @@ struct ContentView: View {
                 newFullPath = parentPath + trimmedName
             }
 
+            // tar archives: rewrite entry paths with the new name
+            if TarArchive.isTarURL(zipURL) {
+                let oldFullPath = node.fullPath
+                mutateTar { entries in
+                    guard !entries.contains(where: { $0.path == newFullPath || $0.path.hasPrefix(newFullPath) }) else {
+                        throw DuplicateEntryError(name: trimmedName)
+                    }
+                    if node.isDirectory {
+                        let prefix = oldFullPath.hasSuffix("/") ? oldFullPath : oldFullPath + "/"
+                        for i in entries.indices {
+                            if entries[i].path == prefix || entries[i].path.hasPrefix(prefix) {
+                                entries[i].path = newFullPath + String(entries[i].path.dropFirst(prefix.count))
+                            }
+                        }
+                    } else {
+                        for i in entries.indices where entries[i].path == oldFullPath {
+                            entries[i].path = newFullPath
+                        }
+                    }
+                }
+                selectedNode = nil
+                pendingRenameNode = nil
+                newNodeName = ""
+                return
+            }
+
             // Check if new name already exists in archive
             if archive.contains(where: { $0.path == newFullPath }) {
                 zipReadError = "An entry with the new name already exists."
@@ -664,6 +728,31 @@ struct ContentView: View {
             ? String(newFullPath.dropLast()) : newFullPath
         if normalizedOld == normalizedNew { return }
 
+        // tar archives: rewrite entry paths under the new parent
+        if TarArchive.isTarURL(zipURL) {
+            let dirPrefix = oldFullPath.hasSuffix("/") ? oldFullPath : oldFullPath + "/"
+            mutateTar { entries in
+                let conflict: Bool
+                if node.isDirectory {
+                    conflict = entries.contains { $0.path == newFullPath || $0.path.hasPrefix(newFullPath) }
+                } else {
+                    conflict = entries.contains { $0.path == newFullPath }
+                }
+                guard !conflict else { throw DuplicateEntryError(name: node.name) }
+                for i in entries.indices {
+                    if node.isDirectory {
+                        if entries[i].path == dirPrefix || entries[i].path.hasPrefix(dirPrefix) {
+                            entries[i].path = newFullPath + String(entries[i].path.dropFirst(dirPrefix.count))
+                        }
+                    } else if entries[i].path == oldFullPath {
+                        entries[i].path = newFullPath
+                    }
+                }
+            }
+            ContentView.dropLogger.debug("moveZipNode: moved \(oldFullPath, privacy: .public) -> \(newFullPath, privacy: .public)")
+            return
+        }
+
         let fm = FileManager.default
         let tempURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent(UUID().uuidString).appendingPathExtension("zip")
@@ -736,6 +825,12 @@ struct ContentView: View {
 
     // Helper: extract limited-size data for preview from an entry in the zip
     private func previewData(from url: URL, fullPath: String, maxBytes: Int = 5 * 1024 * 1024) -> Data? {
+        // tar archives: entry data comes from the parsed tar
+        if TarArchive.isTarURL(url),
+           let entry = (try? TarArchive.read(url: url))?.first(where: { $0.path == fullPath }) {
+            guard entry.data.count <= maxBytes else { return nil }
+            return entry.data
+        }
         guard let archive = try? Archive(url: url, accessMode: .read, pathEncoding: nil) else {
             return nil
         }
@@ -791,7 +886,7 @@ struct ContentView: View {
         guard let sourceURL = zipFileURL else { return }
         #if canImport(AppKit)
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [UTType.zip]
+        panel.allowedContentTypes = ContentView.openableContentTypes
         panel.nameFieldStringValue = sourceURL.lastPathComponent
         panel.begin { response in
             if response == .OK, let destURL = panel.url {
@@ -835,7 +930,6 @@ struct ContentView: View {
     @MainActor
     private func addNewFolder(toParent parentNode: ZipNode?) async {
         guard let zipURL = zipFileURL else { return }
-        guard let archive = try? Archive(url: zipURL, accessMode: .update, pathEncoding: nil) else { return }
         let folderName = newFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !folderName.isEmpty else { return }
         // Compose full path for the new folder (always end with "/")
@@ -846,6 +940,19 @@ struct ContentView: View {
         } else {
             folderPath = folderName + "/"
         }
+        // tar archives: append a directory entry and rewrite
+        if TarArchive.isTarURL(zipURL) {
+            mutateTar { entries in
+                guard !entries.contains(where: { $0.path == folderPath }) else {
+                    throw DuplicateEntryError(name: folderName)
+                }
+                entries.append(TarEntry(path: folderPath, data: Data(), modificationDate: Date(), permissions: 0o755))
+            }
+            selectedNode = nil
+            newFolderName = "New Folder"
+            return
+        }
+        guard let archive = try? Archive(url: zipURL, accessMode: .update, pathEncoding: nil) else { return }
         do {
             // Add directory entry with empty data
             // FIX: supply the full parameter list to resolve the ambiguous addEntry overload
@@ -896,6 +1003,14 @@ struct ContentView: View {
     // Remove selected file entry from the zip (files only)
     private func removeSelectedEntry() {
         guard let node = selectedNode, node.isDirectory == false, let zipURL = zipFileURL else { return }
+        // tar archives: rewrite without the entry
+        if TarArchive.isTarURL(zipURL) {
+            mutateTar { entries in
+                entries.removeAll { $0.path == node.fullPath }
+            }
+            selectedNode = nil
+            return
+        }
         guard let archive = try? Archive(url: zipURL, accessMode: .update, pathEncoding: nil) else { return }
         guard let entry = archive.first(where: { $0.path == node.fullPath }) else {
             zipReadError = "Entry not found in archive."
@@ -915,7 +1030,7 @@ struct ContentView: View {
     private func presentOpenPanel() {
         #if canImport(AppKit)
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [UTType.zip]
+        panel.allowedContentTypes = Self.openableContentTypes
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
@@ -958,6 +1073,11 @@ struct ContentView: View {
 
     private func repackCurrentZipWithProgress() async {
         guard let sourceURL = zipFileURL else { return }
+        // tar archives: normalize by reading and rewriting the archive
+        if TarArchive.isTarURL(sourceURL) {
+            mutateTar { _ in }
+            return
+        }
         let fm = FileManager.default
         let tempDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
         let tempURL = tempDir.appendingPathComponent(UUID().uuidString).appendingPathExtension("zip")
@@ -1050,6 +1170,26 @@ struct ContentView: View {
         }
     }
 
+    // Tar archives are edited by reading all entries, transforming them, and
+    // rewriting the whole archive (the same safe pattern used for zip moves).
+    @MainActor
+    private func mutateTar(_ transform: (inout [TarEntry]) throws -> Void) {
+        guard let url = zipFileURL else { return }
+        do {
+            var entries = try TarArchive.read(url: url)
+            try transform(&entries)
+            try TarArchive.write(entries, to: url)
+            zipNodes = try readZipNodes(url: url)
+        } catch {
+            zipReadError = "Archive operation failed: \(error.localizedDescription)"
+        }
+    }
+
+    private struct DuplicateEntryError: LocalizedError {
+        let name: String
+        var errorDescription: String? { "An entry named \"\(name)\" already exists." }
+    }
+
     // NEW: Drag and Drop Add - stage dropped files into our temp container.
     // The App Sandbox only grants access to drag-dropped URLs during the drop
     // operation itself, so we must copy them synchronously (inside the drop
@@ -1088,9 +1228,9 @@ struct ContentView: View {
             return
         }
 
-        // No archive open: opening a dropped/pasted .zip loads it
+        // No archive open: opening a dropped/pasted archive loads it
         if zipFileURL == nil {
-            if url.pathExtension.lowercased() == "zip" {
+            if ContentView.isArchiveURL(url) {
                 await loadZip(at: url)
             } else {
                 zipReadError = "Create or open an archive before adding files."
@@ -1176,6 +1316,25 @@ struct ContentView: View {
 
     // Add file to zip at optional path prefix
     private func addFileToZip(zipURL: URL, fileURL: URL, atPath pathPrefix: String?) {
+        // tar archives: append the file as a new entry and rewrite
+        if TarArchive.isTarURL(zipURL) {
+            let fileName = fileURL.lastPathComponent
+            let targetPath: String
+            if let prefix = pathPrefix {
+                let normalizedPrefix = prefix.hasSuffix("/") ? prefix : prefix + "/"
+                targetPath = normalizedPrefix + fileName
+            } else {
+                targetPath = fileName
+            }
+            mutateTar { entries in
+                guard !entries.contains(where: { $0.path == targetPath }) else {
+                    throw DuplicateEntryError(name: fileName)
+                }
+                let data = try Data(contentsOf: fileURL)
+                entries.append(TarEntry(path: targetPath, data: data, modificationDate: Date(), permissions: 0o644))
+            }
+            return
+        }
         guard let archive = try? Archive(url: zipURL, accessMode: .update, pathEncoding: nil) else {
             ContentView.dropLogger.error("addFileToZip: could not open archive for update: \(zipURL.path, privacy: .public)")
             zipReadError = "Could not open \(zipURL.lastPathComponent) for writing."
@@ -1205,6 +1364,33 @@ struct ContentView: View {
     // NEW: Drag and Drop Add - Add folder recursively to zip
     private func addFolderToZip(_ folderURL: URL) async {
         guard let zipURL = zipFileURL else { return }
+        // tar archives: append the folder's contents as new entries and rewrite
+        if TarArchive.isTarURL(zipURL) {
+            let fm = FileManager.default
+            let enumerator = fm.enumerator(at: folderURL, includingPropertiesForKeys: nil)
+            let base = folderURL.deletingLastPathComponent().path + "/"
+            var newEntries: [TarEntry] = []
+            let topEntry = TarEntry(path: folderURL.lastPathComponent + "/", data: Data(), modificationDate: Date(), permissions: 0o755)
+            newEntries.append(topEntry)
+            while let item = enumerator?.nextObject() as? URL {
+                var isDir: ObjCBool = false
+                guard fm.fileExists(atPath: item.path, isDirectory: &isDir) else { continue }
+                let relativePath = item.path.replacingOccurrences(of: base, with: "")
+                if isDir.boolValue {
+                    newEntries.append(TarEntry(path: relativePath + "/", data: Data(), modificationDate: Date(), permissions: 0o755))
+                } else {
+                    let data = try? Data(contentsOf: item)
+                    newEntries.append(TarEntry(path: relativePath, data: data ?? Data(), modificationDate: Date(), permissions: 0o644))
+                }
+            }
+            mutateTar { entries in
+                guard !entries.contains(where: { $0.path == topEntry.path }) else {
+                    throw DuplicateEntryError(name: folderURL.lastPathComponent)
+                }
+                entries.append(contentsOf: newEntries)
+            }
+            return
+        }
         guard let archive = try? Archive(url: zipURL, accessMode: .update, pathEncoding: nil) else { return }
         let fm = FileManager.default
 
@@ -1307,29 +1493,39 @@ extension String {
 
 // Helper function for file/folder tree
 func readZipNodes(url: URL) throws -> [ZipNode] {
-    guard let archive = try? Archive(url: url, accessMode: .read, pathEncoding: nil) else {
-        throw CocoaError(.fileReadCorruptFile)
-    }
     var root: [String: ZipNode] = [:]
-    for entry in archive {
-        let pathComponents = entry.path.split(separator: "/").map(String.init)
-        let size: Int64? = entry.type == .file ? Int64(entry.uncompressedSize) : nil
-        let modDate: Date? = entry.fileAttributes[.modificationDate] as? Date
-        insertEntry(pathComponents, entry: entry, root: &root, fullPath: entry.path, size: size, modificationDate: modDate)
+
+    if TarArchive.isTarURL(url) {
+        // tar / tar.gz archives: build the tree from parsed tar entries
+        for tarEntry in try TarArchive.read(url: url) {
+            let pathComponents = tarEntry.path.split(separator: "/").map(String.init)
+            insertEntry(pathComponents, isDirectory: tarEntry.isDirectory, root: &root, fullPath: tarEntry.path, size: tarEntry.isDirectory ? nil : Int64(tarEntry.data.count), modificationDate: tarEntry.modificationDate)
+        }
+    } else {
+        guard let archive = try? Archive(url: url, accessMode: .read, pathEncoding: nil) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        for entry in archive {
+            let pathComponents = entry.path.split(separator: "/").map(String.init)
+            let size: Int64? = entry.type == .file ? Int64(entry.uncompressedSize) : nil
+            let modDate: Date? = entry.fileAttributes[.modificationDate] as? Date
+            insertEntry(pathComponents, isDirectory: entry.path.hasSuffix("/"), root: &root, fullPath: entry.path, size: size, modificationDate: modDate)
+        }
     }
+
     return root.values.sorted { a, b in
         if a.isDirectory != b.isDirectory { return a.isDirectory && !b.isDirectory }
         return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
     }
 }
 
-func insertEntry(_ components: [String], entry: ZIPFoundation.Entry, root: inout [String: ZipNode], fullPath: String, size: Int64?, modificationDate: Date?) {
+func insertEntry(_ components: [String], isDirectory: Bool, root: inout [String: ZipNode], fullPath: String, size: Int64?, modificationDate: Date?) {
     guard let first = components.first else { return }
     if components.count == 1 {
         if root[first] == nil {
             root[first] = ZipNode(
                 name: first,
-                isDirectory: entry.path.hasSuffix("/"),
+                isDirectory: isDirectory,
                 children: nil,
                 fullPath: fullPath,
                 size: size,
@@ -1340,7 +1536,7 @@ func insertEntry(_ components: [String], entry: ZIPFoundation.Entry, root: inout
         var folder = root[first] ?? ZipNode(name: first, isDirectory: true, children: [], fullPath: first)
         let nextChildren = folder.children ?? []
         var childrenDict = Dictionary(uniqueKeysWithValues: nextChildren.map { ($0.name, $0) })
-        insertEntry(Array(components.dropFirst()), entry: entry, root: &childrenDict, fullPath: fullPath, size: size, modificationDate: modificationDate)
+        insertEntry(Array(components.dropFirst()), isDirectory: isDirectory, root: &childrenDict, fullPath: fullPath, size: size, modificationDate: modificationDate)
         folder.children = childrenDict.values.sorted { a, b in
             if a.isDirectory != b.isDirectory { return a.isDirectory && !b.isDirectory }
             return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending

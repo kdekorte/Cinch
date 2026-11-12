@@ -1,10 +1,10 @@
 # Cinch
 
-Cinch is a native macOS archive editor for `.zip` files, built with SwiftUI and AppKit. It lets you browse, edit, and extract the contents of zip archives in a familiar Finder-style multi-column outline view — without ever dropping to the command line.
+Cinch is a native macOS archive editor for `.zip`, `.tar` and `.tar.gz` files, built with SwiftUI and AppKit. It lets you browse, edit, and extract the contents of archives in a familiar Finder-style multi-column outline view — without ever dropping to the command line.
 
 ## Features
 
-- **Browse archives** — Finder-like multi-column outline view (Name, Kind, Size, Date Modified) with sortable, resizable, and reorderable columns.
+- **Browse archives** — Finder-like multi-column outline view (Name, Kind, Size, Date Modified) with sortable, resizable, and reorderable columns. Supports zip, tar and gzip-compressed tar (`tar.gz` / `tgz`) archives.
 - **Create new archives** — start a fresh zip with File ▸ New Zip Archive (⌘N).
 - **Open existing archives** — via the open panel (⌘O) or by dropping a `.zip` onto the window.
 - **Add files and folders**
