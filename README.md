@@ -17,6 +17,41 @@ Cinch is a native macOS archive editor for `.zip` files, built with SwiftUI and 
 - **Drag out** — drag files and folders from the outline view out to the Finder.
 - **Full menu support** — New, Open, Save (⌘S), Save As (⇧⌘S), and Add Files commands, plus keyboard shortcuts.
 
+## Installation
+
+### Homebrew (recommended)
+
+Cinch ships its own Homebrew cask from this repository's GitHub releases:
+
+```sh
+brew tap kdekorte/cinch https://github.com/kdekorte/Cinch
+brew install --cask kdekorte/cinch/cinch
+```
+
+To upgrade to a new release:
+
+```sh
+brew update
+brew upgrade --cask kdekorte/cinch/cinch
+```
+
+To uninstall:
+
+```sh
+brew uninstall --cask kdekorte/cinch/cinch
+brew untap kdekorte/cinch
+```
+
+> **Note:** the cask downloads the release artifact attached to the
+> [GitHub releases](https://github.com/kdekorte/Cinch/releases) page, so it
+> requires a published release (see *Releasing* below).
+
+### Manual
+
+Download `Cinch-<version>.zip` from the
+[releases page](https://github.com/kdekorte/Cinch/releases), unzip it, and drag
+`Cinch.app` to `/Applications`.
+
 ## Requirements
 
 - macOS (AppKit-based UI; see *Project structure* below)
@@ -35,6 +70,27 @@ scripts/build.sh clean        # Remove build artifacts
 ZIP=1 scripts/build.sh release  # also produce build/Cinch-<version>.zip
 ```
 
+## Releasing
+
+To cut a new release:
+
+```sh
+scripts/release.sh
+```
+
+This builds a Release configuration, zips the app with `ditto` (preserving
+signing metadata), and prints the artifact's `sha256`. Then:
+
+1. Attach `build/Cinch-<version>.zip` to a new
+   [GitHub release](https://github.com/kdekorte/Cinch/releases) tagged `v<version>`.
+2. Update `version` and `sha256` in [`Casks/cinch.rb`](Casks/cinch.rb) with the
+   values printed by the script.
+3. Commit and push — Homebrew users get the update on their next `brew upgrade`.
+
+For distribution to other people, sign the app with a "Developer ID Application"
+certificate and notarize it before zipping (`codesign`, `xcrun notarytool`,
+`xcrun stapler`); the release script's header documents the commands.
+
 ## Project structure
 
 ```
@@ -43,6 +99,11 @@ Cinch/
 │   ├── CinchApp.swift            # App entry point, menu commands, AppModel intents
 │   ├── ContentView.swift         # Main UI: archive browsing, editing, drag & drop, saving
 │   └── MultiColumnOutlineView.swift  # NSOutlineView-backed multi-column list (macOS only)
+├── Casks/
+│   └── cinch.rb                  # Homebrew cask (this repo is the tap)
+├── scripts/
+│   ├── build.sh                  # Command-line build script
+│   └── release.sh                # Build, zip and checksum a release artifact
 ├── CinchTests/                   # Swift Testing unit tests
 ├── CinchUITests/                 # UI launch tests
 └── LICENSE
