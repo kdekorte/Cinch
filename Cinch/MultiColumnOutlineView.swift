@@ -1,6 +1,8 @@
 #if canImport(AppKit)
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
+import os
 
 struct MultiColumnOutlineView: NSViewRepresentable {
     @Binding private var selected: ZipNode?
@@ -8,19 +10,23 @@ struct MultiColumnOutlineView: NSViewRepresentable {
     private let onRemove: () -> Void
     private let onSelect: (ZipNode?) -> Void
     private let onCreateZip: () -> Void
+    // DRAG-IN SUPPORT: dropped file URLs, plus the folder node they were dropped onto (if any)
+    private let onDropFiles: ([URL], ZipNode?) -> Void
 
     init(
         roots: [ZipNode],
         selected: Binding<ZipNode?>,
         onRemove: @escaping () -> Void,
         onSelect: @escaping (ZipNode?) -> Void,
-        onCreateZip: @escaping () -> Void = {}
+        onCreateZip: @escaping () -> Void = {},
+        onDropFiles: @escaping ([URL], ZipNode?) -> Void = { _, _ in }
     ) {
         self.roots = roots
         self._selected = selected
         self.onRemove = onRemove
         self.onSelect = onSelect
         self.onCreateZip = onCreateZip
+        self.onDropFiles = onDropFiles
     }
 
     func makeCoordinator() -> Coordinator {
@@ -71,6 +77,13 @@ struct MultiColumnOutlineView: NSViewRepresentable {
         // --- DRAG-OUT SUPPORT FOR FILES/FOLDERS (macOS) ---
         outlineView.registerForDraggedTypes([.fileURL])
         // --- END ---
+
+        // --- DRAG-IN SUPPORT (drop files onto the list) ---
+        // The NSOutlineView intercepts drags (it registers for .fileURL so rows can be
+        // dragged out), which prevents SwiftUI's window-level .onDrop from firing over
+        // the list. Accept drops here instead and forward them to the SwiftUI layer.
+        outlineView.setDraggingSourceOperationMask(.copy, forLocal: false)
+        outlineView.setDraggingSourceOperationMask(.copy, forLocal: true)
 
         scrollView.documentView = outlineView
 
@@ -613,6 +626,64 @@ struct MultiColumnOutlineView: NSViewRepresentable {
             return url as NSURL
         }
 
+        // --- DRAG-IN SUPPORT: accept files/folders dropped onto the list (macOS) ---
+
+        private let dropLogger = Logger(subsystem: "com.cinch.dragdrop", category: "outline-drop")
+
+        private func droppedFileURLs(from pasteboard: NSPasteboard) -> [URL] {
+            // Primary: read file URLs directly
+            if let urls = pasteboard.readObjects(
+                forClasses: [NSURL.self],
+                options: [.urlReadingFileURLsOnly: true]
+            ) as? [URL], !urls.isEmpty {
+                dropLogger.debug("readObjects returned \(urls.count) file URL(s): \(urls.map(\.path), privacy: .public)")
+                return urls
+            }
+            // Fallback: parse the fileURL flavor string by string
+            var urls: [URL] = []
+            for item in pasteboard.pasteboardItems ?? [] {
+                if let s = item.string(forType: .fileURL), let url = URL(string: s) {
+                    urls.append(url)
+                }
+            }
+            dropLogger.debug("fallback parse returned \(urls.count) file URL(s)")
+            return urls
+        }
+
+        func outlineView(_ outlineView: NSOutlineView, validateDrop info: NSDraggingInfo, proposedItem item: Any?, proposedChildIndex index: Int) -> NSDragOperation {
+            let types = info.draggingPasteboard.types ?? []
+            dropLogger.debug("validateDrop: pasteboard types = \(types.map(\.rawValue), privacy: .public)")
+            // Accept any drag that carries file URLs (or a file promise, resolved at accept time)
+            if types.contains(.fileURL) || types.contains(.filePromise)
+                || types.contains(where: { $0.rawValue == UTType.fileURL.identifier }) {
+                return .copy
+            }
+            return []
+        }
+
+        func outlineView(_ outlineView: NSOutlineView, acceptDrop info: NSDraggingInfo, item: Any?, childIndex index: Int) -> Bool {
+            let urls = droppedFileURLs(from: info.draggingPasteboard)
+            guard !urls.isEmpty else {
+                dropLogger.error("acceptDrop: no file URLs found on pasteboard — rejecting")
+                return false
+            }
+            // Dropping onto a directory row adds into that folder; anywhere else adds at the root
+            let targetFolder: ZipNode?
+            if let node = item as? ZipNode, node.isDirectory {
+                targetFolder = node
+            } else if let node = item as? ZipNode,
+                      let parent = childrenMap.keys.first(where: { childrenMap[$0]?.contains(node) ?? false }),
+                      parent.isDirectory {
+                // Dropped onto a file row: add alongside it, in its parent folder
+                targetFolder = parent
+            } else {
+                targetFolder = nil
+            }
+            dropLogger.debug("acceptDrop: forwarding \(urls.count) URL(s), targetFolder = \(targetFolder?.fullPath ?? "root", privacy: .public)")
+            parent().onDropFiles(urls, targetFolder)
+            return true
+        }
+
         // Helper function to extract a ZipNode (file or folder) to a temporary location.
         // If folder, recursively extracts all contents.
         private func extractNodeToTemporaryURL(node: ZipNode) -> URL? {
@@ -686,7 +757,8 @@ struct MultiColumnOutlineView: View {
         selected: Binding<ZipNode?>,
         onRemove: @escaping () -> Void,
         onSelect: @escaping (ZipNode?) -> Void,
-        onCreateZip: @escaping () -> Void = {}
+        onCreateZip: @escaping () -> Void = {},
+        onDropFiles: @escaping ([URL], ZipNode?) -> Void = { _, _ in }
     ) {}
 
     var body: some View {

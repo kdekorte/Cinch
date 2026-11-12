@@ -2,6 +2,7 @@ import SwiftUI
 import Foundation
 import ZIPFoundation
 import UniformTypeIdentifiers
+import os
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -146,16 +147,15 @@ struct ContentView: View {
                         onRemove: { removeSelectedEntry() },
                         onSelect: { node in
                             selectedNode = node
+                        },
+                        onDropFiles: { urls, targetFolder in
+                            Task { @MainActor in
+                                for url in urls {
+                                    await ingestURL(url, into: targetFolder)
+                                }
+                            }
                         }
                     )
-                    // NEW: Drag and Drop Add - add onDrop modifier
-                    .onDrop(of: [UTType.fileURL.identifier], isTargeted: nil) { providers in
-                        guard zipFileURL != nil else { return false }
-                        Task {
-                            await handleDroppedProvidersAsync(providers)
-                        }
-                        return true
-                    }
                     // NEW: Context menu for Add Folder on directories and Rename option for any node
                     .contextMenu {
                         if let selected = selectedNode {
@@ -366,6 +366,30 @@ struct ContentView: View {
         }, message: {
             Text("Enter a new name for \"\(pendingRenameNode?.name ?? "")\".")
         })
+        // NEW: Drag and Drop Add - accept drops anywhere in the window,
+        // including the empty state shown for a new/empty archive
+        .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
+            Task {
+                await handleDroppedProvidersAsync(providers)
+            }
+            return true
+        }
+        // Document handler: open zips launched via Finder, "Open With" or the Dock icon
+        .onOpenURL { url in
+            Task { @MainActor in
+                await loadZip(at: url)
+            }
+        }
+        // NEW: Paste (⌘V) support - add files/folders from the pasteboard to the open archive
+        #if canImport(AppKit)
+        .onAppear {
+            PasteRouter.handlePaste = { self.handlePasteFromPasteboard() }
+            PasteRouter.installMonitor()
+        }
+        .onDisappear {
+            PasteRouter.removeMonitor()
+        }
+        #endif
     }
 
     // NEW: Extract Feature - Extract selected entry
@@ -909,32 +933,72 @@ struct ContentView: View {
         }
     }
 
+    // NEW: Drag and Drop Add + Paste - shared ingestion for a single file/folder URL
+    private static let dropLogger = Logger(subsystem: "com.cinch.dragdrop", category: "ingest")
+
+    private func ingestURL(_ url: URL, into folder: ZipNode? = nil) async {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
+            ContentView.dropLogger.error("ingestURL: file does not exist (or is inaccessible): \(url.path, privacy: .public)")
+            zipReadError = "Could not access \(url.lastPathComponent)."
+            return
+        }
+
+        // No archive open: opening a dropped/pasted .zip loads it
+        if zipFileURL == nil {
+            if url.pathExtension.lowercased() == "zip" {
+                await loadZip(at: url)
+            } else {
+                zipReadError = "Create or open an archive before adding files."
+            }
+            return
+        }
+
+        // Add into the explicitly targeted folder when given, else the selected
+        // folder when one is selected, otherwise at the root
+        let pathPrefix: String?
+        if let folder = folder, folder.isDirectory {
+            pathPrefix = folder.fullPath
+        } else if let selected = selectedNode, selected.isDirectory {
+            pathPrefix = selected.fullPath
+        } else {
+            pathPrefix = nil
+        }
+        ContentView.dropLogger.debug("ingestURL: adding \(url.lastPathComponent, privacy: .public) (isDir=\(isDir.boolValue)) into \(pathPrefix ?? "root", privacy: .public)")
+
+        if isDir.boolValue {
+            await addFolderToZip(url)
+        } else {
+            addFileToZip(zipURL: zipFileURL!, fileURL: url, atPath: pathPrefix)
+        }
+    }
+
+    // NEW: Paste (⌘V) - add file URLs currently on the pasteboard to the open archive
+    #if canImport(AppKit)
+    @MainActor
+    private func handlePasteFromPasteboard() {
+        guard let urls = NSPasteboard.general.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL], !urls.isEmpty else { return }
+        Task { @MainActor in
+            for url in urls {
+                await ingestURL(url)
+            }
+        }
+    }
+    #endif
+
     // NEW: Drag and Drop Add - handle files and directories dropped
     private func handleDroppedProvidersAsync(_ providers: [NSItemProvider]) async {
+        ContentView.dropLogger.debug("SwiftUI onDrop received \(providers.count) provider(s), types: \(providers.map(\.registeredTypeIdentifiers), privacy: .public)")
         for provider in providers {
-            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-                if let url = await loadURL(from: provider) {
-                    var isDir: ObjCBool = false
-                    if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) {
-                        if isDir.boolValue {
-                            // Add folder recursively
-                            await addFolderToZip(url)
-                        } else {
-                            if let selected = selectedNode, selected.isDirectory {
-                                addFileToZip(zipURL: zipFileURL!, fileURL: url, atPath: selected.fullPath)
-                            } else {
-                                addFileToZip(zipURL: zipFileURL!, fileURL: url, atPath: nil)
-                            }
-                        }
-                        return
-                    }
-                }
-            } else if provider.hasItemConformingToTypeIdentifier(UTType.zip.identifier) {
-                if let url = await loadURL(from: provider) {
-                    await loadZip(at: url)
-                    return
-                }
+            guard provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
+                  let url = await loadURL(from: provider) else {
+                ContentView.dropLogger.error("SwiftUI onDrop: provider yielded no file URL")
+                continue
             }
+            await ingestURL(url)
         }
     }
 
@@ -968,7 +1032,11 @@ struct ContentView: View {
 
     // Add file to zip at optional path prefix
     private func addFileToZip(zipURL: URL, fileURL: URL, atPath pathPrefix: String?) {
-        guard let archive = Archive(url: zipURL, accessMode: .update) else { return }
+        guard let archive = Archive(url: zipURL, accessMode: .update) else {
+            ContentView.dropLogger.error("addFileToZip: could not open archive for update: \(zipURL.path, privacy: .public)")
+            zipReadError = "Could not open \(zipURL.lastPathComponent) for writing."
+            return
+        }
         let fileName = fileURL.lastPathComponent
         let targetPath: String
         if let prefix = pathPrefix {
@@ -980,9 +1048,12 @@ struct ContentView: View {
         do {
             // FIX: Use minimal addEntry signature WITHOUT compressionMethod property to avoid build errors
             try archive.addEntry(with: targetPath, relativeTo: fileURL.deletingLastPathComponent())
+            ContentView.dropLogger.debug("addFileToZip: added entry \(targetPath, privacy: .public)")
             // refresh tree
             zipNodes = try readZipNodes(url: zipURL)
+            ContentView.dropLogger.debug("addFileToZip: refreshed tree, \(self.zipNodes.count, privacy: .public) root node(s)")
         } catch {
+            ContentView.dropLogger.error("addFileToZip: failed: \(error.localizedDescription, privacy: .public)")
             zipReadError = "Failed to add file: \(error.localizedDescription)"
         }
     }
@@ -1035,8 +1106,50 @@ extension ContentView {
     }
 }
 
+#if canImport(AppKit)
+/// Routes ⌘V from a local event monitor into the active ContentView.
+/// Cinch is a single-window app, so a static route is sufficient.
+private enum PasteRouter {
+    static var handlePaste: (() -> Void)? = nil
+    static var monitor: Any? = nil
+
+    static func installMonitor() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.modifierFlags.contains(.command),
+               event.charactersIgnoringModifiers?.lowercased() == "v" {
+                // Let text fields (rename / new-folder alerts use a field editor,
+                // which is an NSTextView) paste text normally.
+                if let responder = NSApp.keyWindow?.firstResponder, responder is NSTextView {
+                    return event
+                }
+                // Only consume the event when the pasteboard holds file URLs
+                let urls = NSPasteboard.general.readObjects(
+                    forClasses: [NSURL.self],
+                    options: [.urlReadingFileURLsOnly: true]
+                ) as? [URL]
+                if let urls, !urls.isEmpty {
+                    handlePaste?()
+                    return nil // consumed
+                }
+            }
+            return event
+        }
+    }
+
+    static func removeMonitor() {
+        if let m = monitor {
+            NSEvent.removeMonitor(m)
+            monitor = nil
+        }
+        handlePaste = nil
+    }
+}
+#endif
+
 extension String {
     var isPrintable: Bool {
+
         // Consider a string printable if it contains no control characters except whitespace and newlines
         return !self.unicodeScalars.contains { scalar in
             if CharacterSet.controlCharacters.contains(scalar) {
