@@ -72,24 +72,24 @@ ZIP=1 scripts/build.sh release  # also produce build/Cinch-<version>.zip
 
 ## Releasing
 
-To cut a new release:
+To cut and publish a new release:
 
 ```sh
 scripts/release.sh
 ```
 
-This builds a Release configuration, zips the app with `ditto` (preserving
-signing metadata), and prints the artifact's `sha256`. Then:
-
-1. Attach `build/Cinch-<version>.zip` to a new
-   [GitHub release](https://github.com/kdekorte/Cinch/releases) tagged `v<version>`.
-2. Update `version` and `sha256` in [`Casks/cinch.rb`](Casks/cinch.rb) with the
-   values printed by the script.
-3. Commit and push — Homebrew users get the update on their next `brew upgrade`.
+This builds a Release configuration, packages the app twice — a `ditto` zip
+(preserving signing metadata; used by the Homebrew cask) and a `.pkg` installer
+(via `pkgbuild`, installs to `/Applications`) — updates `version` and `sha256`
+in [`Casks/cinch.rb`](Casks/cinch.rb), commits the cask, tags `v<version>`,
+creates the GitHub release with both artifacts attached, and pushes the branch
+and tag. GitHub automatically provides Source code (zip/tar.gz) links for the
+tag. Use `scripts/release.sh --no-publish` to build and package only, without
+touching git or GitHub.
 
 For distribution to other people, sign the app with a "Developer ID Application"
-certificate and notarize it before zipping (`codesign`, `xcrun notarytool`,
-`xcrun stapler`); the release script's header documents the commands.
+certificate and notarize it before running the release script (`codesign`,
+`xcrun notarytool`, `xcrun stapler`); the script's header documents the commands.
 
 ## Project structure
 
