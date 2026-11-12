@@ -119,8 +119,10 @@ struct MultiColumnOutlineView: NSViewRepresentable {
         context.coordinator.updateRoots(roots)
         context.coordinator.updateSelected(selected)
         outlineView.reloadData()
-        // Restore expansion states:
+        // Restore expansion states (tracked by path so they survive tree reloads):
         context.coordinator.restoreExpansionStates(in: outlineView)
+        // Re-select the row for the selected node's path (if still present)
+        context.coordinator.restoreSelection(in: outlineView)
         // Apply current sort
         context.coordinator.applySortDescriptors(outlineView.sortDescriptors)
     }
@@ -135,7 +137,8 @@ struct MultiColumnOutlineView: NSViewRepresentable {
 
         private var sortDescriptors: [NSSortDescriptor] = []
 
-        private var expandedItems: Set<ZipNode> = []
+        // Expansion state, tracked by entry path (survives tree reloads)
+        private var expandedPaths: Set<String> = []
 
         private let byteFormatter = ByteCountFormatter()
         private let dateFormatter: DateFormatter = {
@@ -599,21 +602,43 @@ struct MultiColumnOutlineView: NSViewRepresentable {
         }
 
         // MARK: Expansion States
+        // Tracked by fullPath, not by ZipNode identity: nodes are rebuilt with
+        // fresh UUIDs on every tree reload, so identity-based tracking would
+        // lose the expanded/collapsed state whenever the view refreshes.
 
         func restoreExpansionStates(in outlineView: NSOutlineView) {
-            for node in expandedItems {
+            for root in roots {
+                restoreExpansionRecursively(root, in: outlineView)
+            }
+        }
+
+        private func restoreExpansionRecursively(_ node: ZipNode, in outlineView: NSOutlineView) {
+            if expandedPaths.contains(node.fullPath) {
                 outlineView.expandItem(node)
+            }
+            for child in childrenMap[node] ?? [] {
+                restoreExpansionRecursively(child, in: outlineView)
             }
         }
 
         func outlineViewItemDidExpand(_ notification: Notification) {
             guard let item = notification.userInfo?["NSObject"] as? ZipNode else { return }
-            expandedItems.insert(item)
+            expandedPaths.insert(item.fullPath)
         }
 
         func outlineViewItemDidCollapse(_ notification: Notification) {
             guard let item = notification.userInfo?["NSObject"] as? ZipNode else { return }
-            expandedItems.remove(item)
+            expandedPaths.remove(item.fullPath)
+        }
+
+        // Re-selects the row whose node matches the selected node's path
+        func restoreSelection(in outlineView: NSOutlineView) {
+            guard let selectedPath = parent().selected?.fullPath,
+                  let node = nodeForPath(selectedPath) else { return }
+            let row = outlineView.row(forItem: node)
+            if row >= 0, outlineView.selectedRow != row {
+                outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            }
         }
 
         // --- DRAG-OUT SUPPORT FOR FILES/FOLDERS (macOS) ---
@@ -720,6 +745,10 @@ struct MultiColumnOutlineView: NSViewRepresentable {
                 }
                 let targetFolder = targetFolderForDrop(onItem: item)
                 dropLogger.debug("acceptDrop: moving \(nodes.count) node(s) into \(targetFolder?.fullPath ?? "root", privacy: .public)")
+                // Auto-expand the destination folder so the moved entry is visible
+                if let target = targetFolder {
+                    expandedPaths.insert(target.fullPath)
+                }
                 parent().onMoveNodes(nodes, targetFolder)
                 return true
             }
