@@ -5,7 +5,7 @@
 # Usage:
 #   scripts/release.sh              Show current version and status
 #   scripts/release.sh tag          Tag the current commit and push
-#   scripts/release.sh package      Build the distribution zip and pkg
+#   scripts/release.sh package      Build the distribution zip, pkg and source zip
 #   scripts/release.sh release      Create GitHub release and upload assets
 #   scripts/release.sh cask         Update the Homebrew cask with the correct version and SHA256
 #   scripts/release.sh all          Run all steps: tag, release and cask update
@@ -22,8 +22,10 @@ TAG="v${VERSION}"
 CASK="Casks/cinch.rb"
 ZIP="Cinch-${VERSION}.zip"
 PKG="Cinch-${VERSION}.pkg"
+SRC="Cinch-${VERSION}-source.zip"
 ZIP_URL="https://github.com/kdekorte/Cinch/releases/download/${TAG}/${ZIP}"
 PKG_URL="https://github.com/kdekorte/Cinch/releases/download/${TAG}/${PKG}"
+SRC_URL="https://github.com/kdekorte/Cinch/releases/download/${TAG}/${SRC}"
 
 info()    { printf "\033[1;34m==>\033[0m \033[1m%s\033[0m\n" "$1"; }
 success() { printf "\033[1;32m==>\033[0m \033[1m%s\033[0m\n" "$1"; }
@@ -36,6 +38,7 @@ show_status() {
     echo "  Cask:        ${CASK}"
     echo "  Zip URL:     ${ZIP_URL}"
     echo "  Pkg URL:     ${PKG_URL}"
+    echo "  Src URL:     ${SRC_URL}"
     echo ""
 
     if git rev-parse "${TAG}" >/dev/null 2>&1; then
@@ -87,6 +90,16 @@ do_package() {
         --component build/Cinch.app \
         "build/${PKG}"
     success "Created build/${PKG}"
+
+    # Source archive: from the release tag when it exists, otherwise HEAD
+    if git rev-parse "${TAG}" >/dev/null 2>&1; then
+        info "Building source package from ${TAG}"
+        git archive --format=zip -o "build/${SRC}" "${TAG}"
+    else
+        info "Building source package from HEAD (tag ${TAG} not created yet)"
+        git archive --format=zip -o "build/${SRC}" HEAD
+    fi
+    success "Created build/${SRC}"
 }
 
 
@@ -113,20 +126,24 @@ do_release() {
     if [ ! -f "build/${PKG}" ]; then
         error "Package 'build/${PKG}' not found after build."
     fi
+    if [ ! -f "build/${SRC}" ]; then
+        error "Package 'build/${SRC}' not found after build."
+    fi
 
-    # Create the release and upload the assets (GitHub auto-provides the
-    # Source code zip/tar.gz links for the tag)
-    info "Uploading ${ZIP} and ${PKG} to release ${TAG}"
+    # Create the release and upload the assets
+    info "Uploading ${ZIP}, ${PKG} and ${SRC} to release ${TAG}"
     gh release create "${TAG}" \
         --repo kdekorte/Cinch \
         --title "Cinch ${VERSION}" \
         --generate-notes \
         "build/${ZIP}" \
-        "build/${PKG}"
+        "build/${PKG}" \
+        "build/${SRC}"
 
     success "Release ${TAG} created:"
     echo "  ${ZIP_URL}"
     echo "  ${PKG_URL}"
+    echo "  ${SRC_URL}"
 }
 
 do_cask() {
@@ -181,8 +198,8 @@ case "${1:-status}" in
         echo "Commands:"
         echo "  status    Show current version and release status (default)"
         echo "  tag       Create and push a git tag for the current version"
-        echo "  package   Build the Cinch-VERSION.zip and Cinch-VERSION.pkg artifacts"
-        echo "  release   Create GitHub release and upload the zip and pkg"
+        echo "  package   Build the Cinch-VERSION.zip, .pkg and -source.zip artifacts"
+        echo "  release   Create GitHub release and upload the zip, pkg and source"
         echo "  cask      Update the Homebrew cask version and SHA256"
         echo "  all       Run tag, release and cask in sequence"
         exit 1

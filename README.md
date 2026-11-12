@@ -85,10 +85,10 @@ scripts/release.sh all        # run tag, release and cask in sequence
 ```
 
 The zip is built with `ditto` (preserving signing metadata; used by the
-Homebrew cask) and the `.pkg` with `pkgbuild` (installs to `/Applications`).
-The `cask` step downloads the published zip to compute the SHA256, so the cask
-always matches the release artifact. GitHub automatically provides Source code
-(zip/tar.gz) links for the tag. Requires `gh` authenticated via `gh auth login`.
+Homebrew cask), the `.pkg` with `pkgbuild` (installs to `/Applications`), and
+the source zip with `git archive` (from the release tag). The `cask` step
+downloads the published zip to compute the SHA256, so the cask always matches
+the release artifact. Requires `gh` authenticated via `gh auth login`.
 
 For distribution to other people, sign the app with a "Developer ID Application"
 certificate and notarize it before running the release script (`codesign`,
