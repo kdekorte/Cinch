@@ -33,6 +33,8 @@ struct ContentView: View {
     // New folder state
     @State private var showNewFolderPrompt: Bool = false
     @State private var newFolderName: String = "New Folder"
+    // Parent folder chosen via the outline's context menu (nil = root/selected)
+    @State private var pendingNewFolderParent: ZipNode? = nil
 
     // --- RENAME FEATURE ---
     @State private var showRenamePrompt: Bool = false
@@ -181,6 +183,15 @@ struct ContentView: View {
                             Task { @MainActor in
                                 await moveZipNodes(nodes, into: targetFolder)
                             }
+                        },
+                        onCreateFolder: { folder in
+                            pendingNewFolderParent = folder
+                            showNewFolderPrompt = true
+                        },
+                        onRename: { node in
+                            pendingRenameNode = node
+                            newNodeName = node.name
+                            showRenamePrompt = true
                         }
                     )
                     // NEW: Context menu for Add Folder on directories and Rename option for any node
@@ -372,7 +383,8 @@ struct ContentView: View {
             TextField("Folder Name", text: $newFolderName)
             Button("Add") {
                 Task {
-                    await addNewFolder(toParent: (selectedNode?.isDirectory == true) ? selectedNode : nil)
+                    await addNewFolder(toParent: pendingNewFolderParent ?? ((selectedNode?.isDirectory == true) ? selectedNode : nil))
+                    pendingNewFolderParent = nil
                 }
             }
             Button("Cancel", role: .cancel) { }
@@ -1053,24 +1065,36 @@ struct ContentView: View {
         // Future enhancement: push into directories
     }
 
-    // Remove selected file entry from the zip (files only)
+    // Remove the selected entry (file or folder) from the archive
     private func removeSelectedEntry() {
-        guard let node = selectedNode, node.isDirectory == false, let zipURL = zipFileURL else { return }
-        // tar archives: rewrite without the entry
+        guard let node = selectedNode, let zipURL = zipFileURL else { return }
+        // tar archives: rewrite without the entry (and its contents, for folders)
         if TarArchive.isTarURL(zipURL) {
+            let prefix = node.isDirectory && !node.fullPath.hasSuffix("/")
+                ? node.fullPath + "/" : node.fullPath
             mutateTar { entries in
-                entries.removeAll { $0.path == node.fullPath }
+                entries.removeAll { $0.path == node.fullPath || $0.path.hasPrefix(prefix.hasSuffix("/") ? prefix : prefix + "/") }
             }
             selectedNode = nil
             return
         }
         guard let archive = try? Archive(url: zipURL, accessMode: .update, pathEncoding: nil) else { return }
-        guard let entry = archive.first(where: { $0.path == node.fullPath }) else {
+        // Collect every entry to remove first (mutating while iterating is unsafe)
+        let entriesToRemove: [ZIPFoundation.Entry]
+        if node.isDirectory {
+            let prefix = node.fullPath.hasSuffix("/") ? node.fullPath : node.fullPath + "/"
+            entriesToRemove = archive.filter { $0.path == prefix || $0.path.hasPrefix(prefix) }
+        } else {
+            entriesToRemove = archive.filter { $0.path == node.fullPath }
+        }
+        guard !entriesToRemove.isEmpty else {
             zipReadError = "Entry not found in archive."
             return
         }
         do {
-            try archive.remove(entry)
+            for entry in entriesToRemove {
+                try archive.remove(entry)
+            }
             // Refresh tree
             zipNodes = try readZipNodes(url: zipURL)
             selectedNode = nil

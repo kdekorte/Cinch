@@ -14,6 +14,10 @@ struct MultiColumnOutlineView: NSViewRepresentable {
     private let onDropFiles: ([URL], ZipNode?) -> Void
     // INTERNAL MOVE SUPPORT: nodes dragged within the outline, plus the target folder (nil = root)
     private let onMoveNodes: ([ZipNode], ZipNode?) -> Void
+    // CONTEXT MENU: create a new folder inside the given folder (nil = root)
+    private let onCreateFolder: (ZipNode?) -> Void
+    // CONTEXT MENU: rename the given node
+    private let onRename: (ZipNode) -> Void
 
     // Pasteboard type used to recognize drags that originate from this outline view
     static let movePasteboardType = NSPasteboard.PasteboardType("com.kdekorte.cinch.zipnode")
@@ -25,7 +29,9 @@ struct MultiColumnOutlineView: NSViewRepresentable {
         onSelect: @escaping (ZipNode?) -> Void,
         onCreateZip: @escaping () -> Void = {},
         onDropFiles: @escaping ([URL], ZipNode?) -> Void = { _, _ in },
-        onMoveNodes: @escaping ([ZipNode], ZipNode?) -> Void = { _, _ in }
+        onMoveNodes: @escaping ([ZipNode], ZipNode?) -> Void = { _, _ in },
+        onCreateFolder: @escaping (ZipNode?) -> Void = { _ in },
+        onRename: @escaping (ZipNode) -> Void = { _ in }
     ) {
         self.roots = roots
         self._selected = selected
@@ -34,6 +40,8 @@ struct MultiColumnOutlineView: NSViewRepresentable {
         self.onCreateZip = onCreateZip
         self.onDropFiles = onDropFiles
         self.onMoveNodes = onMoveNodes
+        self.onCreateFolder = onCreateFolder
+        self.onRename = onRename
     }
 
     func makeCoordinator() -> Coordinator {
@@ -469,17 +477,54 @@ struct MultiColumnOutlineView: NSViewRepresentable {
         func outlineView(_ outlineView: NSOutlineView, menuFor event: NSEvent) -> NSMenu? {
             let point = outlineView.convert(event.locationInWindow, from: nil)
             let row = outlineView.row(at: point)
+            let node = row >= 0 ? outlineView.item(atRow: row) as? ZipNode : nil
+
+            // Select the row under the cursor, like Finder, so actions that
+            // operate on the selection act on the right-clicked entry
+            if row >= 0 {
+                outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            }
+
             let menu = NSMenu(title: "Context Menu")
+
+            let newFolderItem = NSMenuItem(title: "New Folder", action: #selector(newFolderAction(_:)), keyEquivalent: "")
+            newFolderItem.target = self
+            newFolderItem.representedObject = node
+            menu.addItem(newFolderItem)
+
+            if let node = node {
+                menu.addItem(NSMenuItem.separator())
+                let renameItem = NSMenuItem(title: "Rename", action: #selector(renameAction(_:)), keyEquivalent: "")
+                renameItem.target = self
+                renameItem.representedObject = node
+                menu.addItem(renameItem)
+
+                let deleteItem = NSMenuItem(title: "Delete", action: #selector(removeAction(_:)), keyEquivalent: "")
+                deleteItem.target = self
+                deleteItem.representedObject = node
+                menu.addItem(deleteItem)
+            }
+
+            menu.addItem(NSMenuItem.separator())
             let newZipItem = NSMenuItem(title: "New Zip…", action: #selector(newZipAction(_:)), keyEquivalent: "")
             newZipItem.target = self
             menu.addItem(newZipItem)
-            if row >= 0, let node = outlineView.item(atRow: row) as? ZipNode, !node.isDirectory {
-                let removeItem = NSMenuItem(title: "Remove", action: #selector(removeAction(_:)), keyEquivalent: "")
-                removeItem.target = self
-                removeItem.representedObject = node
-                menu.addItem(removeItem)
-            }
             return menu
+        }
+
+        @objc private func newFolderAction(_ sender: NSMenuItem) {
+            // Create inside the right-clicked folder (or, for a file row, its
+            // parent); at the root when the click was on empty space
+            if let node = sender.representedObject as? ZipNode {
+                parent().onCreateFolder(targetFolderForDrop(onItem: node))
+            } else {
+                parent().onCreateFolder(nil)
+            }
+        }
+
+        @objc private func renameAction(_ sender: NSMenuItem) {
+            guard let node = sender.representedObject as? ZipNode else { return }
+            parent().onRename(node)
         }
 
         @objc private func removeAction(_ sender: NSMenuItem) {
@@ -840,7 +885,9 @@ struct MultiColumnOutlineView: View {
         onSelect: @escaping (ZipNode?) -> Void,
         onCreateZip: @escaping () -> Void = {},
         onDropFiles: @escaping ([URL], ZipNode?) -> Void = { _, _ in },
-        onMoveNodes: @escaping ([ZipNode], ZipNode?) -> Void = { _, _ in }
+        onMoveNodes: @escaping ([ZipNode], ZipNode?) -> Void = { _, _ in },
+        onCreateFolder: @escaping (ZipNode?) -> Void = { _ in },
+        onRename: @escaping (ZipNode) -> Void = { _ in }
     ) {}
 
     var body: some View {
