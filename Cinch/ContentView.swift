@@ -413,7 +413,7 @@ struct ContentView: View {
         panel.begin { response in
             if response == .OK, let destinationURL = panel.url {
                 do {
-                    guard let archive = Archive(url: zipURL, accessMode: .read) else {
+                    guard let archive = try? Archive(url: zipURL, accessMode: .read, pathEncoding: nil) else {
                         setExtractError("Could not open archive for reading.")
                         return
                     }
@@ -422,13 +422,13 @@ struct ContentView: View {
                         let prefix = node.fullPath.hasSuffix("/") ? node.fullPath : node.fullPath + "/"
                         for entry in archive {
                             if entry.path == prefix || entry.path.hasPrefix(prefix) {
-                                try archive.extract(entry, to: destinationURL.appendingPathComponent(entry.path))
+                                _ = try archive.extract(entry, to: destinationURL.appendingPathComponent(entry.path))
                             }
                         }
                     } else {
                         // Extract single file
                         if let entry = archive.first(where: { $0.path == node.fullPath }) {
-                            try archive.extract(entry, to: destinationURL.appendingPathComponent(entry.path))
+                            _ = try archive.extract(entry, to: destinationURL.appendingPathComponent(entry.path))
                         } else {
                             setExtractError("Selected file not found in archive.")
                             return
@@ -467,11 +467,11 @@ struct ContentView: View {
                     if fm.fileExists(atPath: url.path) {
                         try fm.removeItem(at: url)
                     }
-                    guard let archive = Archive(url: url, accessMode: .create) else {
+                    // Create empty archive (result unused; we only need the file to exist)
+                    guard (try? Archive(url: url, accessMode: .create, pathEncoding: nil)) != nil else {
                         zipReadError = "Failed to create archive at \(url.path)"
                         return
                     }
-                    // No entries added, empty archive created
                     DispatchQueue.main.async {
                         zipFileURL = url
                         zipNodes = []
@@ -511,7 +511,7 @@ struct ContentView: View {
         }
 
         do {
-            guard let archive = Archive(url: zipURL, accessMode: .update) else {
+            guard let archive = try? Archive(url: zipURL, accessMode: .update, pathEncoding: nil) else {
                 zipReadError = "Failed to open archive for update."
                 return
             }
@@ -577,12 +577,12 @@ struct ContentView: View {
                     }
                     // Extract data for entry
                     var entryData = Data()
-                    try archive.extract(entry) { chunk in
+                    _ = try archive.extract(entry) { chunk in
                         entryData.append(chunk)
                     }
                     // Add new entry with same attributes
                     // FIX: Use minimal addEntry signature WITHOUT compressionMethod property to avoid build errors
-                    try archive.addEntry(with: targetPath, type: entry.type, uncompressedSize: UInt32(entryData.count), provider: { position, size in
+                    try archive.addEntry(with: targetPath, type: entry.type, uncompressedSize: Int64(entryData.count), provider: { position, size in
                         let start = Int(position)
                         let end = min(start + Int(size), entryData.count)
                         return entryData.subdata(in: start..<end)
@@ -600,12 +600,12 @@ struct ContentView: View {
                 }
                 // Extract data
                 var data = Data()
-                try archive.extract(oldEntry) { chunk in
+                _ = try archive.extract(oldEntry) { chunk in
                     data.append(chunk)
                 }
                 // Add new entry
                 // FIX: Use minimal addEntry signature WITHOUT compressionMethod property to avoid build errors
-                try archive.addEntry(with: newFullPath, type: oldEntry.type, uncompressedSize: UInt32(data.count), provider: { position, size in
+                try archive.addEntry(with: newFullPath, type: oldEntry.type, uncompressedSize: Int64(data.count), provider: { position, size in
                     let start = Int(position)
                     let end = min(start + Int(size), data.count)
                     return data.subdata(in: start..<end)
@@ -668,7 +668,7 @@ struct ContentView: View {
         let tempURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent(UUID().uuidString).appendingPathExtension("zip")
         do {
-            guard let readArchive = Archive(url: zipURL, accessMode: .read) else {
+            guard let readArchive = try? Archive(url: zipURL, accessMode: .read, pathEncoding: nil) else {
                 zipReadError = "Failed to open archive for reading."
                 return
             }
@@ -691,7 +691,7 @@ struct ContentView: View {
             if fm.fileExists(atPath: tempURL.path) {
                 try fm.removeItem(at: tempURL)
             }
-            guard let writeArchive = Archive(url: tempURL, accessMode: .create) else {
+            guard let writeArchive = try? Archive(url: tempURL, accessMode: .create, pathEncoding: nil) else {
                 zipReadError = "Could not create temp archive."
                 return
             }
@@ -708,11 +708,11 @@ struct ContentView: View {
                 }
 
                 var entryData = Data()
-                try readArchive.extract(entry) { chunk in
+                _ = try readArchive.extract(entry) { chunk in
                     entryData.append(chunk)
                 }
                 // FIX: Use minimal addEntry signature WITHOUT compressionMethod property to avoid build errors
-                try writeArchive.addEntry(with: targetPath, type: entry.type, uncompressedSize: UInt32(entryData.count), provider: { position, size in
+                try writeArchive.addEntry(with: targetPath, type: entry.type, uncompressedSize: Int64(entryData.count), provider: { position, size in
                     let start = Int(position)
                     let end = min(start + Int(size), entryData.count)
                     return entryData.subdata(in: start..<end)
@@ -736,13 +736,13 @@ struct ContentView: View {
 
     // Helper: extract limited-size data for preview from an entry in the zip
     private func previewData(from url: URL, fullPath: String, maxBytes: Int = 5 * 1024 * 1024) -> Data? {
-        guard let archive = Archive(url: url, accessMode: .read) else {
+        guard let archive = try? Archive(url: url, accessMode: .read, pathEncoding: nil) else {
             return nil
         }
         guard let entry = archive.first(where: { $0.path == fullPath }) else { return nil }
         var data = Data()
         do {
-            try archive.extract(entry) { chunk in
+            _ = try archive.extract(entry) { chunk in
                 if data.count < maxBytes {
                     data.append(chunk)
                 }
@@ -835,7 +835,7 @@ struct ContentView: View {
     @MainActor
     private func addNewFolder(toParent parentNode: ZipNode?) async {
         guard let zipURL = zipFileURL else { return }
-        guard let archive = Archive(url: zipURL, accessMode: .update) else { return }
+        guard let archive = try? Archive(url: zipURL, accessMode: .update, pathEncoding: nil) else { return }
         let folderName = newFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !folderName.isEmpty else { return }
         // Compose full path for the new folder (always end with "/")
@@ -896,7 +896,7 @@ struct ContentView: View {
     // Remove selected file entry from the zip (files only)
     private func removeSelectedEntry() {
         guard let node = selectedNode, node.isDirectory == false, let zipURL = zipFileURL else { return }
-        guard let archive = Archive(url: zipURL, accessMode: .update) else { return }
+        guard let archive = try? Archive(url: zipURL, accessMode: .update, pathEncoding: nil) else { return }
         guard let entry = archive.first(where: { $0.path == node.fullPath }) else {
             zipReadError = "Entry not found in archive."
             return
@@ -963,7 +963,7 @@ struct ContentView: View {
         let tempURL = tempDir.appendingPathComponent(UUID().uuidString).appendingPathExtension("zip")
         do {
             // Read from source and write all entries into a new archive at tempURL
-            guard let readArchive = Archive(url: sourceURL, accessMode: .read) else {
+            guard let readArchive = try? Archive(url: sourceURL, accessMode: .read, pathEncoding: nil) else {
                 zipReadError = "Could not open archive for reading."
                 return
             }
@@ -971,18 +971,18 @@ struct ContentView: View {
             if fm.fileExists(atPath: tempURL.path) {
                 try fm.removeItem(at: tempURL)
             }
-            guard let writeArchive = Archive(url: tempURL, accessMode: .create) else {
+            guard let writeArchive = try? Archive(url: tempURL, accessMode: .create, pathEncoding: nil) else {
                 zipReadError = "Could not create temp archive."
                 return
             }
             for entry in readArchive {
                 // Copy entries by streaming
                 var entryData = Data()
-                try readArchive.extract(entry) { data in
+                _ = try readArchive.extract(entry) { data in
                     entryData.append(data)
                 }
                 // FIX: Use minimal addEntry signature WITHOUT compressionMethod property to avoid build errors
-                try writeArchive.addEntry(with: entry.path, type: entry.type, uncompressedSize: UInt32(entryData.count), provider: { position, size in
+                try writeArchive.addEntry(with: entry.path, type: entry.type, uncompressedSize: Int64(entryData.count), provider: { position, size in
                     let start = Int(position)
                     let end = min(start + Int(size), entryData.count)
                     return entryData.subdata(in: start..<end)
@@ -1000,7 +1000,7 @@ struct ContentView: View {
             // Cleanup temp on failure
             try? fm.removeItem(at: tempURL)
         }
-        await endSaving()
+        endSaving()
     }
 
     // Repack the current zip to a temp file and atomically replace the original
@@ -1011,7 +1011,7 @@ struct ContentView: View {
         let tempURL = tempDir.appendingPathComponent(UUID().uuidString).appendingPathExtension("zip")
         do {
             // Read from source and write all entries into a new archive at tempURL
-            guard let readArchive = Archive(url: sourceURL, accessMode: .read) else {
+            guard let readArchive = try? Archive(url: sourceURL, accessMode: .read, pathEncoding: nil) else {
                 zipReadError = "Could not open archive for reading."
                 return
             }
@@ -1019,18 +1019,18 @@ struct ContentView: View {
             if fm.fileExists(atPath: tempURL.path) {
                 try fm.removeItem(at: tempURL)
             }
-            guard let writeArchive = Archive(url: tempURL, accessMode: .create) else {
+            guard let writeArchive = try? Archive(url: tempURL, accessMode: .create, pathEncoding: nil) else {
                 zipReadError = "Could not create temp archive."
                 return
             }
             for entry in readArchive {
                 // Copy entries by streaming
                 var entryData = Data()
-                try readArchive.extract(entry) { data in
+                _ = try readArchive.extract(entry) { data in
                     entryData.append(data)
                 }
                 // FIX: Use minimal addEntry signature WITHOUT compressionMethod property to avoid build errors
-                try writeArchive.addEntry(with: entry.path, type: entry.type, uncompressedSize: UInt32(entryData.count), provider: { position, size in
+                try writeArchive.addEntry(with: entry.path, type: entry.type, uncompressedSize: Int64(entryData.count), provider: { position, size in
                     let start = Int(position)
                     let end = min(start + Int(size), entryData.count)
                     return entryData.subdata(in: start..<end)
@@ -1176,7 +1176,7 @@ struct ContentView: View {
 
     // Add file to zip at optional path prefix
     private func addFileToZip(zipURL: URL, fileURL: URL, atPath pathPrefix: String?) {
-        guard let archive = Archive(url: zipURL, accessMode: .update) else {
+        guard let archive = try? Archive(url: zipURL, accessMode: .update, pathEncoding: nil) else {
             ContentView.dropLogger.error("addFileToZip: could not open archive for update: \(zipURL.path, privacy: .public)")
             zipReadError = "Could not open \(zipURL.lastPathComponent) for writing."
             return
@@ -1205,7 +1205,7 @@ struct ContentView: View {
     // NEW: Drag and Drop Add - Add folder recursively to zip
     private func addFolderToZip(_ folderURL: URL) async {
         guard let zipURL = zipFileURL else { return }
-        guard let archive = Archive(url: zipURL, accessMode: .update) else { return }
+        guard let archive = try? Archive(url: zipURL, accessMode: .update, pathEncoding: nil) else { return }
         let fm = FileManager.default
 
         let enumerator = fm.enumerator(at: folderURL, includingPropertiesForKeys: nil)
@@ -1307,7 +1307,7 @@ extension String {
 
 // Helper function for file/folder tree
 func readZipNodes(url: URL) throws -> [ZipNode] {
-    guard let archive = Archive(url: url, accessMode: .read) else {
+    guard let archive = try? Archive(url: url, accessMode: .read, pathEncoding: nil) else {
         throw CocoaError(.fileReadCorruptFile)
     }
     var root: [String: ZipNode] = [:]
@@ -1338,7 +1338,7 @@ func insertEntry(_ components: [String], entry: ZIPFoundation.Entry, root: inout
         }
     } else {
         var folder = root[first] ?? ZipNode(name: first, isDirectory: true, children: [], fullPath: first)
-        var nextChildren = folder.children ?? []
+        let nextChildren = folder.children ?? []
         var childrenDict = Dictionary(uniqueKeysWithValues: nextChildren.map { ($0.name, $0) })
         insertEntry(Array(components.dropFirst()), entry: entry, root: &childrenDict, fullPath: fullPath, size: size, modificationDate: modificationDate)
         folder.children = childrenDict.values.sorted { a, b in

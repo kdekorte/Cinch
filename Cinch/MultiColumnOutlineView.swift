@@ -344,9 +344,9 @@ struct MultiColumnOutlineView: NSViewRepresentable {
                 } else {
                     // Use file icon from system for file extension or default generic document icon
                     if let ext = (node.name as NSString).pathExtension.nonEmpty {
-                        imageView.image = NSWorkspace.shared.icon(forFileType: ext)
+                        imageView.image = NSWorkspace.shared.icon(for: UTType(filenameExtension: ext) ?? .data)
                     } else {
-                        imageView.image = NSWorkspace.shared.icon(forFileType: NSFileTypeForHFSTypeCode(OSType(kGenericDocumentIcon)))
+                        imageView.image = NSWorkspace.shared.icon(for: .data)
                     }
                 }
 
@@ -721,8 +721,8 @@ struct MultiColumnOutlineView: NSViewRepresentable {
             if types.contains(MultiColumnOutlineView.movePasteboardType) {
                 return .move
             }
-            // Accept any drag that carries file URLs (or a file promise, resolved at accept time)
-            if types.contains(.fileURL) || types.contains(.filePromise)
+            // Accept any drag that carries file URLs (resolved at accept time)
+            if types.contains(.fileURL)
                 || types.contains(where: { $0.rawValue == UTType.fileURL.identifier }) {
                 return .copy
             }
