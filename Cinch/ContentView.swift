@@ -156,6 +156,11 @@ struct ContentView: View {
                                     await ingestURL(url, into: targetFolder)
                                 }
                             }
+                        },
+                        onMoveNodes: { nodes, targetFolder in
+                            Task { @MainActor in
+                                await moveZipNodes(nodes, into: targetFolder)
+                            }
                         }
                     )
                     // NEW: Context menu for Add Folder on directories and Rename option for any node
@@ -616,6 +621,116 @@ struct ContentView: View {
             newNodeName = ""
         } catch {
             zipReadError = "Rename failed: \(error.localizedDescription)"
+        }
+    }
+
+    // NEW: MOVE FEATURE - Move nodes (files or folders) into another folder (nil = root)
+    @MainActor
+    private func moveZipNodes(_ nodes: [ZipNode], into folder: ZipNode?) async {
+        guard let zipURL = zipFileURL else { return }
+        for node in nodes {
+            await moveZipNode(node, into: folder, zipURL: zipURL)
+        }
+    }
+
+    @MainActor
+    private func moveZipNode(_ node: ZipNode, into folder: ZipNode?, zipURL: URL) async {
+        // Target folder path prefix ("" = root)
+        var folderPrefix = ""
+        if let folder = folder {
+            let p = folder.fullPath
+            folderPrefix = p.hasSuffix("/") ? p : p + "/"
+            // Guard: cannot move a folder into itself or one of its descendants
+            if node.isDirectory {
+                let nodePrefix = node.fullPath.hasSuffix("/") ? node.fullPath : node.fullPath + "/"
+                if folder.fullPath == node.fullPath || folderPrefix.hasPrefix(nodePrefix) {
+                    zipReadError = "Cannot move a folder into itself."
+                    return
+                }
+            }
+        }
+
+        // Compute the new full path (keep the same name, change the parent)
+        let oldFullPath = node.fullPath
+        let name = node.isDirectory
+            ? String(node.fullPath.dropLast(node.fullPath.hasSuffix("/") ? 1 : 0).split(separator: "/").last ?? "")
+            : node.name
+        let newFullPath = folderPrefix + name + (node.isDirectory ? "/" : "")
+
+        // No-op if the entry already lives in that folder
+        let normalizedOld = node.isDirectory && oldFullPath.hasSuffix("/")
+            ? String(oldFullPath.dropLast()) : oldFullPath
+        let normalizedNew = node.isDirectory && newFullPath.hasSuffix("/")
+            ? String(newFullPath.dropLast()) : newFullPath
+        if normalizedOld == normalizedNew { return }
+
+        do {
+            guard let archive = Archive(url: zipURL, accessMode: .update) else {
+                zipReadError = "Failed to open archive for update."
+                return
+            }
+
+            // Collect the entries to move
+            let entriesToMove: [ZIPFoundation.Entry]
+            if node.isDirectory {
+                let prefix = oldFullPath.hasSuffix("/") ? oldFullPath : oldFullPath + "/"
+                entriesToMove = archive.filter { $0.path == prefix || $0.path.hasPrefix(prefix) }
+            } else {
+                entriesToMove = archive.filter { $0.path == oldFullPath }
+            }
+            guard !entriesToMove.isEmpty else {
+                zipReadError = "Original entry not found."
+                return
+            }
+
+            // Check the destination does not already contain an entry with this name
+            if node.isDirectory {
+                if archive.contains(where: { $0.path == newFullPath || $0.path.hasPrefix(newFullPath) }) {
+                    zipReadError = "An entry named \"\(node.name)\" already exists in that folder."
+                    return
+                }
+            } else if archive.contains(where: { $0.path == newFullPath }) {
+                zipReadError = "An entry named \"\(node.name)\" already exists in that folder."
+                return
+            }
+
+            // Rewrite the entries under the new path, then remove the old ones
+            if node.isDirectory {
+                let prefix = oldFullPath.hasSuffix("/") ? oldFullPath : oldFullPath + "/"
+                for entry in entriesToMove {
+                    let relativePath = String(entry.path.dropFirst(prefix.count))
+                    let targetPath = newFullPath + relativePath
+                    var entryData = Data()
+                    try archive.extract(entry) { chunk in
+                        entryData.append(chunk)
+                    }
+                    try archive.addEntry(with: targetPath, type: entry.type, uncompressedSize: UInt32(entryData.count), provider: { position, size in
+                        let start = Int(position)
+                        let end = min(start + Int(size), entryData.count)
+                        return entryData.subdata(in: start..<end)
+                    })
+                }
+            } else {
+                let entry = entriesToMove[0]
+                var data = Data()
+                try archive.extract(entry) { chunk in
+                    data.append(chunk)
+                }
+                try archive.addEntry(with: newFullPath, type: entry.type, uncompressedSize: UInt32(data.count), provider: { position, size in
+                    let start = Int(position)
+                    let end = min(start + Int(size), data.count)
+                    return data.subdata(in: start..<end)
+                })
+            }
+            for entry in entriesToMove {
+                try archive.remove(entry)
+            }
+
+            // Refresh tree
+            zipNodes = try readZipNodes(url: zipURL)
+            ContentView.dropLogger.debug("moveZipNode: moved \(oldFullPath, privacy: .public) -> \(newFullPath, privacy: .public)")
+        } catch {
+            zipReadError = "Move failed: \(error.localizedDescription)"
         }
     }
 

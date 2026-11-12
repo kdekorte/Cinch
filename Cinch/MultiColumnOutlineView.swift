@@ -12,6 +12,11 @@ struct MultiColumnOutlineView: NSViewRepresentable {
     private let onCreateZip: () -> Void
     // DRAG-IN SUPPORT: dropped file URLs, plus the folder node they were dropped onto (if any)
     private let onDropFiles: ([URL], ZipNode?) -> Void
+    // INTERNAL MOVE SUPPORT: nodes dragged within the outline, plus the target folder (nil = root)
+    private let onMoveNodes: ([ZipNode], ZipNode?) -> Void
+
+    // Pasteboard type used to recognize drags that originate from this outline view
+    static let movePasteboardType = NSPasteboard.PasteboardType("com.kdekorte.cinch.zipnode")
 
     init(
         roots: [ZipNode],
@@ -19,7 +24,8 @@ struct MultiColumnOutlineView: NSViewRepresentable {
         onRemove: @escaping () -> Void,
         onSelect: @escaping (ZipNode?) -> Void,
         onCreateZip: @escaping () -> Void = {},
-        onDropFiles: @escaping ([URL], ZipNode?) -> Void = { _, _ in }
+        onDropFiles: @escaping ([URL], ZipNode?) -> Void = { _, _ in },
+        onMoveNodes: @escaping ([ZipNode], ZipNode?) -> Void = { _, _ in }
     ) {
         self.roots = roots
         self._selected = selected
@@ -27,6 +33,7 @@ struct MultiColumnOutlineView: NSViewRepresentable {
         self.onSelect = onSelect
         self.onCreateZip = onCreateZip
         self.onDropFiles = onDropFiles
+        self.onMoveNodes = onMoveNodes
     }
 
     func makeCoordinator() -> Coordinator {
@@ -83,7 +90,7 @@ struct MultiColumnOutlineView: NSViewRepresentable {
         // dragged out), which prevents SwiftUI's window-level .onDrop from firing over
         // the list. Accept drops here instead and forward them to the SwiftUI layer.
         outlineView.setDraggingSourceOperationMask(.copy, forLocal: false)
-        outlineView.setDraggingSourceOperationMask(.copy, forLocal: true)
+        outlineView.setDraggingSourceOperationMask([.copy, .move], forLocal: true)
 
         scrollView.documentView = outlineView
 
@@ -616,14 +623,21 @@ struct MultiColumnOutlineView: NSViewRepresentable {
                 return nil
             }
 
-            guard let url = extractNodeToTemporaryURL(node: node) else {
-                return nil
+            // The pasteboard item carries two flavors:
+            // 1. Our custom type, so dropping back onto this outline moves the
+            //    entry inside the archive (rather than re-adding a temp copy).
+            // 2. A file URL (extracted to a temp location), so the row can also
+            //    be dragged out to the Finder.
+            let pasteboardItem = NSPasteboardItem()
+            pasteboardItem.setData(Data(node.fullPath.utf8), forType: MultiColumnOutlineView.movePasteboardType)
+
+            if let url = extractNodeToTemporaryURL(node: node) {
+                // Keep the URLs alive for the duration of drag
+                dragTempURLs = [url]
+                pasteboardItem.setString(url.absoluteString, forType: .fileURL)
             }
 
-            // Keep the URLs alive for the duration of drag
-            dragTempURLs = [url]
-
-            return url as NSURL
+            return pasteboardItem
         }
 
         // --- DRAG-IN SUPPORT: accept files/folders dropped onto the list (macOS) ---
@@ -650,9 +664,38 @@ struct MultiColumnOutlineView: NSViewRepresentable {
             return urls
         }
 
+        // Finds the node with the given fullPath in the current tree
+        private func nodeForPath(_ fullPath: String) -> ZipNode? {
+            var queue = roots
+            while !queue.isEmpty {
+                let node = queue.removeFirst()
+                if node.fullPath == fullPath { return node }
+                queue.append(contentsOf: childrenMap[node] ?? [])
+            }
+            return nil
+        }
+
+        // Resolves the folder a drop on the given item should target
+        private func targetFolderForDrop(onItem item: Any?) -> ZipNode? {
+            if let node = item as? ZipNode, node.isDirectory {
+                return node
+            }
+            if let node = item as? ZipNode,
+               let parent = childrenMap.keys.first(where: { childrenMap[$0]?.contains(node) ?? false }),
+               parent.isDirectory {
+                // Dropped onto a file row: add alongside it, in its parent folder
+                return parent
+            }
+            return nil
+        }
+
         func outlineView(_ outlineView: NSOutlineView, validateDrop info: NSDraggingInfo, proposedItem item: Any?, proposedChildIndex index: Int) -> NSDragOperation {
             let types = info.draggingPasteboard.types ?? []
             dropLogger.debug("validateDrop: pasteboard types = \(types.map(\.rawValue), privacy: .public)")
+            // Internal drag (from this outline): move the entry within the archive
+            if types.contains(MultiColumnOutlineView.movePasteboardType) {
+                return .move
+            }
             // Accept any drag that carries file URLs (or a file promise, resolved at accept time)
             if types.contains(.fileURL) || types.contains(.filePromise)
                 || types.contains(where: { $0.rawValue == UTType.fileURL.identifier }) {
@@ -662,23 +705,32 @@ struct MultiColumnOutlineView: NSViewRepresentable {
         }
 
         func outlineView(_ outlineView: NSOutlineView, acceptDrop info: NSDraggingInfo, item: Any?, childIndex index: Int) -> Bool {
-            let urls = droppedFileURLs(from: info.draggingPasteboard)
+            let pasteboard = info.draggingPasteboard
+
+            // Internal move: drop entries from this outline into another folder (or the root)
+            if pasteboard.types?.contains(MultiColumnOutlineView.movePasteboardType) == true {
+                let fullPaths = (pasteboard.pasteboardItems ?? []).compactMap { item in
+                    item.data(forType: MultiColumnOutlineView.movePasteboardType)
+                        .flatMap { String(data: $0, encoding: .utf8) }
+                }
+                let nodes = fullPaths.compactMap { nodeForPath($0) }
+                guard !nodes.isEmpty else {
+                    dropLogger.error("acceptDrop: internal move but no matching nodes found")
+                    return false
+                }
+                let targetFolder = targetFolderForDrop(onItem: item)
+                dropLogger.debug("acceptDrop: moving \(nodes.count) node(s) into \(targetFolder?.fullPath ?? "root", privacy: .public)")
+                parent().onMoveNodes(nodes, targetFolder)
+                return true
+            }
+
+            // External drop: files from the Finder (or another app)
+            let urls = droppedFileURLs(from: pasteboard)
             guard !urls.isEmpty else {
                 dropLogger.error("acceptDrop: no file URLs found on pasteboard — rejecting")
                 return false
             }
-            // Dropping onto a directory row adds into that folder; anywhere else adds at the root
-            let targetFolder: ZipNode?
-            if let node = item as? ZipNode, node.isDirectory {
-                targetFolder = node
-            } else if let node = item as? ZipNode,
-                      let parent = childrenMap.keys.first(where: { childrenMap[$0]?.contains(node) ?? false }),
-                      parent.isDirectory {
-                // Dropped onto a file row: add alongside it, in its parent folder
-                targetFolder = parent
-            } else {
-                targetFolder = nil
-            }
+            let targetFolder = targetFolderForDrop(onItem: item)
             dropLogger.debug("acceptDrop: forwarding \(urls.count) URL(s), targetFolder = \(targetFolder?.fullPath ?? "root", privacy: .public)")
             parent().onDropFiles(urls, targetFolder)
             return true
@@ -758,7 +810,8 @@ struct MultiColumnOutlineView: View {
         onRemove: @escaping () -> Void,
         onSelect: @escaping (ZipNode?) -> Void,
         onCreateZip: @escaping () -> Void = {},
-        onDropFiles: @escaping ([URL], ZipNode?) -> Void = { _, _ in }
+        onDropFiles: @escaping ([URL], ZipNode?) -> Void = { _, _ in },
+        onMoveNodes: @escaping ([ZipNode], ZipNode?) -> Void = { _, _ in }
     ) {}
 
     var body: some View {
