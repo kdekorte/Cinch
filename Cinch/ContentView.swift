@@ -664,73 +664,73 @@ struct ContentView: View {
             ? String(newFullPath.dropLast()) : newFullPath
         if normalizedOld == normalizedNew { return }
 
+        let fm = FileManager.default
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent(UUID().uuidString).appendingPathExtension("zip")
         do {
-            guard let archive = Archive(url: zipURL, accessMode: .update) else {
-                zipReadError = "Failed to open archive for update."
-                return
-            }
-
-            // Collect the entries to move
-            let entriesToMove: [ZIPFoundation.Entry]
-            if node.isDirectory {
-                let prefix = oldFullPath.hasSuffix("/") ? oldFullPath : oldFullPath + "/"
-                entriesToMove = archive.filter { $0.path == prefix || $0.path.hasPrefix(prefix) }
-            } else {
-                entriesToMove = archive.filter { $0.path == oldFullPath }
-            }
-            guard !entriesToMove.isEmpty else {
-                zipReadError = "Original entry not found."
+            guard let readArchive = Archive(url: zipURL, accessMode: .read) else {
+                zipReadError = "Failed to open archive for reading."
                 return
             }
 
             // Check the destination does not already contain an entry with this name
+            let conflict: Bool
             if node.isDirectory {
-                if archive.contains(where: { $0.path == newFullPath || $0.path.hasPrefix(newFullPath) }) {
-                    zipReadError = "An entry named \"\(node.name)\" already exists in that folder."
-                    return
-                }
-            } else if archive.contains(where: { $0.path == newFullPath }) {
+                conflict = readArchive.contains { $0.path == newFullPath || $0.path.hasPrefix(newFullPath) }
+            } else {
+                conflict = readArchive.contains { $0.path == newFullPath }
+            }
+            if conflict {
                 zipReadError = "An entry named \"\(node.name)\" already exists in that folder."
                 return
             }
 
-            // Rewrite the entries under the new path, then remove the old ones
-            if node.isDirectory {
-                let prefix = oldFullPath.hasSuffix("/") ? oldFullPath : oldFullPath + "/"
-                for entry in entriesToMove {
-                    let relativePath = String(entry.path.dropFirst(prefix.count))
-                    let targetPath = newFullPath + relativePath
-                    var entryData = Data()
-                    try archive.extract(entry) { chunk in
-                        entryData.append(chunk)
-                    }
-                    try archive.addEntry(with: targetPath, type: entry.type, uncompressedSize: UInt32(entryData.count), provider: { position, size in
-                        let start = Int(position)
-                        let end = min(start + Int(size), entryData.count)
-                        return entryData.subdata(in: start..<end)
-                    })
+            // Rewrite the archive entry-by-entry into a fresh temp file instead of
+            // mutating in place: interleaving addEntry/remove on an archive open in
+            // .update mode can corrupt the central directory.
+            if fm.fileExists(atPath: tempURL.path) {
+                try fm.removeItem(at: tempURL)
+            }
+            guard let writeArchive = Archive(url: tempURL, accessMode: .create) else {
+                zipReadError = "Could not create temp archive."
+                return
+            }
+
+            let dirPrefix = oldFullPath.hasSuffix("/") ? oldFullPath : oldFullPath + "/"
+            for entry in readArchive {
+                let targetPath: String
+                if node.isDirectory {
+                    targetPath = (entry.path == dirPrefix || entry.path.hasPrefix(dirPrefix))
+                        ? newFullPath + String(entry.path.dropFirst(dirPrefix.count))
+                        : entry.path
+                } else {
+                    targetPath = (entry.path == oldFullPath) ? newFullPath : entry.path
                 }
-            } else {
-                let entry = entriesToMove[0]
-                var data = Data()
-                try archive.extract(entry) { chunk in
-                    data.append(chunk)
+
+                var entryData = Data()
+                try readArchive.extract(entry) { chunk in
+                    entryData.append(chunk)
                 }
-                try archive.addEntry(with: newFullPath, type: entry.type, uncompressedSize: UInt32(data.count), provider: { position, size in
+                // FIX: Use minimal addEntry signature WITHOUT compressionMethod property to avoid build errors
+                try writeArchive.addEntry(with: targetPath, type: entry.type, uncompressedSize: UInt32(entryData.count), provider: { position, size in
                     let start = Int(position)
-                    let end = min(start + Int(size), data.count)
-                    return data.subdata(in: start..<end)
+                    let end = min(start + Int(size), entryData.count)
+                    return entryData.subdata(in: start..<end)
                 })
             }
-            for entry in entriesToMove {
-                try archive.remove(entry)
+
+            // Atomically replace the original
+            if fm.fileExists(atPath: zipURL.path) {
+                try fm.removeItem(at: zipURL)
             }
+            try fm.moveItem(at: tempURL, to: zipURL)
 
             // Refresh tree
             zipNodes = try readZipNodes(url: zipURL)
             ContentView.dropLogger.debug("moveZipNode: moved \(oldFullPath, privacy: .public) -> \(newFullPath, privacy: .public)")
         } catch {
             zipReadError = "Move failed: \(error.localizedDescription)"
+            try? fm.removeItem(at: tempURL)
         }
     }
 
