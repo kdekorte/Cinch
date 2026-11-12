@@ -1491,6 +1491,15 @@ extension String {
     }
 }
 
+// True for entries that are macOS metadata, not real user files:
+// "._name" AppleDouble companions (xattrs/resource forks) and the
+// "__MACOSX" folder Finder's "Compress" adds to zips.
+func isMacOSMetadataPath(_ path: String) -> Bool {
+    if path.hasPrefix("__MACOSX/") || path == "__MACOSX" { return true }
+    let name = path.split(separator: "/").last ?? Substring(path)
+    return name.hasPrefix("._")
+}
+
 // Helper function for file/folder tree
 func readZipNodes(url: URL) throws -> [ZipNode] {
     var root: [String: ZipNode] = [:]
@@ -1498,6 +1507,9 @@ func readZipNodes(url: URL) throws -> [ZipNode] {
     if TarArchive.isTarURL(url) {
         // tar / tar.gz archives: build the tree from parsed tar entries
         for tarEntry in try TarArchive.read(url: url) {
+            // Hide AppleDouble "._foo" metadata entries (Finder does the same);
+            // they stay in the archive, just out of the tree view.
+            if isMacOSMetadataPath(tarEntry.path) { continue }
             let pathComponents = tarEntry.path.split(separator: "/").map(String.init)
             insertEntry(pathComponents, isDirectory: tarEntry.isDirectory, root: &root, fullPath: tarEntry.path, size: tarEntry.isDirectory ? nil : Int64(tarEntry.data.count), modificationDate: tarEntry.modificationDate)
         }
@@ -1506,6 +1518,7 @@ func readZipNodes(url: URL) throws -> [ZipNode] {
             throw CocoaError(.fileReadCorruptFile)
         }
         for entry in archive {
+            if isMacOSMetadataPath(entry.path) { continue }
             let pathComponents = entry.path.split(separator: "/").map(String.init)
             let size: Int64? = entry.type == .file ? Int64(entry.uncompressedSize) : nil
             let modDate: Date? = entry.fileAttributes[.modificationDate] as? Date
