@@ -72,20 +72,23 @@ ZIP=1 scripts/build.sh release  # also produce build/Cinch-<version>.zip
 
 ## Releasing
 
-To cut and publish a new release:
+Release management is handled by `scripts/release.sh` (modeled on the basika
+release script):
 
 ```sh
-scripts/release.sh
+scripts/release.sh            # show current version and release status
+scripts/release.sh tag        # create and push the v<version> git tag
+scripts/release.sh package    # build Cinch-<version>.zip and Cinch-<version>.pkg
+scripts/release.sh release    # create the GitHub release and upload both artifacts
+scripts/release.sh cask       # update Casks/cinch.rb version and SHA256
+scripts/release.sh all        # run tag, release and cask in sequence
 ```
 
-This builds a Release configuration, packages the app twice — a `ditto` zip
-(preserving signing metadata; used by the Homebrew cask) and a `.pkg` installer
-(via `pkgbuild`, installs to `/Applications`) — updates `version` and `sha256`
-in [`Casks/cinch.rb`](Casks/cinch.rb), commits the cask, tags `v<version>`,
-creates the GitHub release with both artifacts attached, and pushes the branch
-and tag. GitHub automatically provides Source code (zip/tar.gz) links for the
-tag. Use `scripts/release.sh --no-publish` to build and package only, without
-touching git or GitHub.
+The zip is built with `ditto` (preserving signing metadata; used by the
+Homebrew cask) and the `.pkg` with `pkgbuild` (installs to `/Applications`).
+The `cask` step downloads the published zip to compute the SHA256, so the cask
+always matches the release artifact. GitHub automatically provides Source code
+(zip/tar.gz) links for the tag. Requires `gh` authenticated via `gh auth login`.
 
 For distribution to other people, sign the app with a "Developer ID Application"
 certificate and notarize it before running the release script (`codesign`,

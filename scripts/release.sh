@@ -1,113 +1,190 @@
 #!/bin/bash
 #
-# scripts/release.sh — build and publish a Cinch release
+# scripts/release.sh - Release management for Cinch
 #
 # Usage:
-#   scripts/release.sh              Full release: build, package, update cask,
-#                                   tag, create the GitHub release and attach
-#                                   the .zip and .pkg artifacts
-#   scripts/release.sh --no-publish # Build and package only; print the sha256
-#                                   without tagging or touching GitHub
+#   scripts/release.sh              Show current version and status
+#   scripts/release.sh tag          Tag the current commit and push
+#   scripts/release.sh package      Build the distribution zip and pkg
+#   scripts/release.sh release      Create GitHub release and upload assets
+#   scripts/release.sh cask         Update the Homebrew cask with the correct version and SHA256
+#   scripts/release.sh all          Run all steps: tag, release and cask update
 #
-# What it does:
-#   1. Release build via scripts/build.sh
-#   2. Zip the .app with ditto (preserves symlinks, permissions and
-#      code-signature metadata — Finder's "Compress" does not)
-#   3. Build an installer .pkg with pkgbuild (installs to /Applications)
-#   4. Update version + sha256 in Casks/cinch.rb and commit it
-#   5. Tag v<version> and create the GitHub release via `gh`, attaching
-#      Cinch-<version>.zip and Cinch-<version>.pkg
-#      (GitHub also auto-provides Source code zip/tar.gz links for the tag.)
+# Requires: gh (GitHub CLI), authenticated via `gh auth login`
 #
-# Requires: Xcode, `gh` (authenticated: `gh auth login`), pkgbuild (part of macOS)
-#
-# Before distributing publicly, the app should be signed with a
-# "Developer ID Application" certificate and notarized BEFORE packaging:
-#   codesign --force --deep --options runtime --sign "Developer ID Application: …" build/Cinch.app
-#   xcrun notarytool submit build/Cinch-<version>.zip --apple-id … --team-id … --password … --wait
-#   xcrun stapler staple build/Cinch.app
-# then re-run this script so the zip/pkg carry the notarized app.
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-ROOT="$(pwd)"
-OUT_DIR="$ROOT/build"
-PUBLISH=1
-if [[ "${1:-}" == "--no-publish" ]]; then
-  PUBLISH=0
-fi
 
-VERSION="$(sed -n 's/.*MARKETING_VERSION = \([0-9.]*\);/\1/p' Cinch.xcodeproj/project.pbxproj | head -1)"
-if [[ -z "$VERSION" ]]; then
-  echo "error: could not read MARKETING_VERSION from the project file" >&2
-  exit 1
-fi
+VERSION=$(sed -n 's/.*MARKETING_VERSION = \([0-9.]*\);/\1/p' Cinch.xcodeproj/project.pbxproj | head -1)
 TAG="v${VERSION}"
+CASK="Casks/cinch.rb"
+ZIP="Cinch-${VERSION}.zip"
+PKG="Cinch-${VERSION}.pkg"
+ZIP_URL="https://github.com/kdekorte/Cinch/releases/download/${TAG}/${ZIP}"
+PKG_URL="https://github.com/kdekorte/Cinch/releases/download/${TAG}/${PKG}"
 
-echo "==> Building Cinch (Release, version ${VERSION})"
-"$ROOT/scripts/build.sh" release
+info()    { printf "\033[1;34m==>\033[0m \033[1m%s\033[0m\n" "$1"; }
+success() { printf "\033[1;32m==>\033[0m \033[1m%s\033[0m\n" "$1"; }
+error()   { printf "\033[1;31mError:\033[0m %s\n" "$1" >&2; exit 1; }
 
-APP="$OUT_DIR/Cinch.app"
-ZIP="$OUT_DIR/Cinch-${VERSION}.zip"
-PKG="$OUT_DIR/Cinch-${VERSION}.pkg"
+show_status() {
+    info "Cinch release status"
+    echo "  Version:     ${VERSION}"
+    echo "  Tag:         ${TAG}"
+    echo "  Cask:        ${CASK}"
+    echo "  Zip URL:     ${ZIP_URL}"
+    echo "  Pkg URL:     ${PKG_URL}"
+    echo ""
 
-echo "==> Zipping ${ZIP}"
-rm -f "$ZIP"
-ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+    if git rev-parse "${TAG}" >/dev/null 2>&1; then
+        success "Tag ${TAG} exists locally"
+    else
+        echo "  Tag ${TAG} has not been created yet"
+    fi
 
-echo "==> Building installer ${PKG}"
-rm -f "$PKG"
-pkgbuild \
-  --identifier "com.kdekorte.Cinch" \
-  --version "$VERSION" \
-  --install-location "/Applications" \
-  --component "$APP" \
-  "$PKG"
+    if command -v gh >/dev/null 2>&1; then
+        if gh release view "${TAG}" --repo kdekorte/Cinch >/dev/null 2>&1; then
+            success "GitHub release ${TAG} exists"
+        else
+            echo "  GitHub release ${TAG} has not been created yet"
+        fi
+    fi
+}
 
-SHA256="$(shasum -a 256 "$ZIP" | awk '{print $1}')"
-echo "    zip sha256: ${SHA256}"
+do_tag() {
+    info "Tagging release ${TAG}"
 
-echo "==> Updating Casks/cinch.rb"
-sed -i '' -E \
-  -e "s/^  version \".*\"/  version \"${VERSION}\"/" \
-  -e "s/^  sha256 \".*\"/  sha256 \"${SHA256}\"/" \
-  "Casks/cinch.rb"
+    if git rev-parse "${TAG}" >/dev/null 2>&1; then
+        error "Tag ${TAG} already exists. Bump MARKETING_VERSION in Cinch.xcodeproj first."
+    fi
 
-if [[ $PUBLISH -eq 0 ]]; then
-  echo ""
-  echo "==> Done (not published):"
-  echo "    ${ZIP}  (sha256 ${SHA256})"
-  echo "    ${PKG}"
-  exit 0
-fi
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+        error "Working tree is dirty. Commit all changes before tagging."
+    fi
 
-if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
-  echo "error: tag ${TAG} already exists. Bump MARKETING_VERSION or delete the tag first:" >&2
-  echo "  git tag -d ${TAG} && git push origin :refs/tags/${TAG}" >&2
-  exit 1
-fi
+    git tag -a "${TAG}" -m "Release ${VERSION}"
+    info "Pushing tag ${TAG} to origin"
+    git push origin "${TAG}"
+    success "Tag ${TAG} created and pushed"
+}
 
-echo "==> Committing cask update"
-git add "Casks/cinch.rb"
-git diff --cached --quiet -- "Casks/cinch.rb" || \
-  git commit -m "Bump cask to ${VERSION} (sha256 ${SHA256:0:12}…)"
+# Build the distribution artifacts in build/: the ditto zip (its signature
+# survives; used by the Homebrew cask) and the pkgbuild installer.
+do_package() {
+    info "Building distribution package"
+    scripts/build.sh release
+    rm -f "build/${ZIP}" "build/${PKG}"
+    ditto -c -k --sequesterRsrc --keepParent build/Cinch.app "build/${ZIP}"
+    success "Created build/${ZIP}"
 
-echo "==> Tagging ${TAG}"
-git tag "${TAG}"
+    info "Building installer package"
+    pkgbuild \
+        --identifier "com.kdekorte.Cinch" \
+        --version "${VERSION}" \
+        --install-location "/Applications" \
+        --component build/Cinch.app \
+        "build/${PKG}"
+    success "Created build/${PKG}"
+}
 
-echo "==> Creating GitHub release ${TAG}"
-gh release create "$TAG" \
-  --repo kdekorte/Cinch \
-  --title "Cinch ${VERSION}" \
-  --generate-notes \
-  "$ZIP" \
-  "$PKG"
 
-echo "==> Pushing branch and tag"
-git push origin HEAD
-git push origin "$TAG"
+do_release() {
+    info "Creating GitHub release ${TAG}"
 
-echo ""
-echo "==> Released ${TAG}: https://github.com/kdekorte/Cinch/releases/tag/${TAG}"
-echo "    Artifacts: ${ZIP}, ${PKG} (source zip/tar.gz are auto-provided by GitHub)"
+    command -v gh >/dev/null 2>&1 || error "GitHub CLI (gh) is required. Install with: brew install gh"
+    gh auth status >/dev/null 2>&1 || error "Not authenticated. Run: gh auth login"
+
+    if ! git rev-parse "${TAG}" >/dev/null 2>&1; then
+        error "Tag ${TAG} does not exist. Run 'scripts/release.sh tag' first."
+    fi
+
+    if gh release view "${TAG}" --repo kdekorte/Cinch >/dev/null 2>&1; then
+        error "GitHub release ${TAG} already exists. Bump MARKETING_VERSION in Cinch.xcodeproj first."
+    fi
+
+    # Build the artifacts
+    do_package
+
+    if [ ! -f "build/${ZIP}" ]; then
+        error "Package 'build/${ZIP}' not found after build."
+    fi
+    if [ ! -f "build/${PKG}" ]; then
+        error "Package 'build/${PKG}' not found after build."
+    fi
+
+    # Create the release and upload the assets (GitHub auto-provides the
+    # Source code zip/tar.gz links for the tag)
+    info "Uploading ${ZIP} and ${PKG} to release ${TAG}"
+    gh release create "${TAG}" \
+        --repo kdekorte/Cinch \
+        --title "Cinch ${VERSION}" \
+        --generate-notes \
+        "build/${ZIP}" \
+        "build/${PKG}"
+
+    success "Release ${TAG} created:"
+    echo "  ${ZIP_URL}"
+    echo "  ${PKG_URL}"
+}
+
+do_cask() {
+    info "Updating Homebrew cask for ${TAG}"
+
+    if ! git rev-parse "${TAG}" >/dev/null 2>&1; then
+        error "Tag ${TAG} does not exist. Run 'scripts/release.sh tag' first."
+    fi
+
+    info "Downloading ${ZIP} to compute SHA256..."
+    SHA256=$(curl -sfL "${ZIP_URL}" | shasum -a 256 | awk '{print $1}')
+
+    # An empty download hashes to e3b0c442...; treat it as missing.
+    if [ -z "${SHA256}" ] || [ "${#SHA256}" -ne 64 ] || [ "${SHA256}" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]; then
+        error "Failed to download ${ZIP_URL}. Has the release been published? Run 'scripts/release.sh release' first."
+    fi
+
+    info "SHA256: ${SHA256}"
+    sed -i '' "s|^  version \".*\"|  version \"${VERSION}\"|" "${CASK}"
+    sed -i '' "s|^  sha256 \".*\"|  sha256 \"${SHA256}\"|" "${CASK}"
+
+    success "Cask updated:"
+    echo "  Version: ${VERSION}"
+    echo "  SHA256:  ${SHA256}"
+    echo ""
+    echo "Don't forget to commit the updated cask:"
+    echo "  git add ${CASK}"
+    echo "  git commit -m \"Update cask for ${VERSION}\""
+    echo "  git push"
+}
+
+do_all() {
+    do_tag
+    echo ""
+    do_release
+    echo ""
+    do_cask
+}
+
+# --- Main ---
+
+case "${1:-status}" in
+    status)   show_status ;;
+    tag)      do_tag ;;
+    package)  do_package ;;
+    release)  do_release ;;
+    cask)     do_cask ;;
+    all)      do_all ;;
+    *)
+        echo "Usage: $0 {status|tag|package|release|cask|all}"
+        echo ""
+        echo "Commands:"
+        echo "  status    Show current version and release status (default)"
+        echo "  tag       Create and push a git tag for the current version"
+        echo "  package   Build the Cinch-VERSION.zip and Cinch-VERSION.pkg artifacts"
+        echo "  release   Create GitHub release and upload the zip and pkg"
+        echo "  cask      Update the Homebrew cask version and SHA256"
+        echo "  all       Run tag, release and cask in sequence"
+        exit 1
+        ;;
+esac
