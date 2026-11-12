@@ -4,6 +4,19 @@ import SwiftUI
 import UniformTypeIdentifiers
 import os
 
+// NSOutlineView subclass that serves its context menu from the coordinator.
+// Overriding menuForEvent(_:) directly (instead of relying on the
+// outlineView(_:menuFor:) delegate method, whose Swift selector is easy to
+// get subtly wrong and which SwiftUI's .contextMenu can mask) guarantees the
+// menu is consulted for every right-click on the outline.
+final class OutlineViewWithMenu: NSOutlineView {
+    var menuProvider: ((NSEvent) -> NSMenu?)?
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        menuProvider?(event) ?? super.menu(for: event)
+    }
+}
+
 struct MultiColumnOutlineView: NSViewRepresentable {
     @Binding private var selected: ZipNode?
     private let roots: [ZipNode]
@@ -54,9 +67,13 @@ struct MultiColumnOutlineView: NSViewRepresentable {
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
 
-        let outlineView = NSOutlineView(frame: .zero)
+        let outlineView = OutlineViewWithMenu(frame: .zero)
         outlineView.delegate = context.coordinator
         outlineView.dataSource = context.coordinator
+        outlineView.menuProvider = { [weak coordinator = context.coordinator, weak outlineView] event in
+            guard let coordinator, let outlineView else { return nil }
+            return coordinator.buildContextMenu(for: event, in: outlineView)
+        }
         outlineView.headerView = NSTableHeaderView()
         outlineView.usesAlternatingRowBackgroundColors = true
         outlineView.allowsMultipleSelection = false
@@ -474,7 +491,7 @@ struct MultiColumnOutlineView: NSViewRepresentable {
 
         // MARK: Context Menu
 
-        func outlineView(_ outlineView: NSOutlineView, menuFor event: NSEvent) -> NSMenu? {
+        func buildContextMenu(for event: NSEvent, in outlineView: NSOutlineView) -> NSMenu? {
             let point = outlineView.convert(event.locationInWindow, from: nil)
             let row = outlineView.row(at: point)
             let node = row >= 0 ? outlineView.item(atRow: row) as? ZipNode : nil

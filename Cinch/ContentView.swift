@@ -195,20 +195,8 @@ struct ContentView: View {
                         }
                     )
                     // NEW: Context menu for Add Folder on directories and Rename option for any node
-                    .contextMenu {
-                        if let selected = selectedNode {
-                            if selected.isDirectory {
-                                Button("Add Folder…") {
-                                    showNewFolderPrompt = true
-                                }
-                            }
-                            Button("Rename") {
-                                pendingRenameNode = selected
-                                newNodeName = selected.name
-                                showRenamePrompt = true
-                            }
-                        }
-                    }
+                    // Context menu is served by the outline view itself
+                    // (see OutlineViewWithMenu / buildContextMenu)
                     #else
                     Text("Multi-column outline is only available on macOS.")
                         .foregroundStyle(.secondary)
