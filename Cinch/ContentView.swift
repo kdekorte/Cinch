@@ -132,9 +132,15 @@ struct ContentView: View {
                                 Button {
                                     Task { await createNewZip() }
                                 } label: {
-                                    Label("New Archive", systemImage: "doc.badge.plus")
+                                    Label("New Zip", systemImage: "doc.badge.plus")
                                 }
                                 .buttonStyle(.borderedProminent)
+                                Button {
+                                    Task { await createNewTar() }
+                                } label: {
+                                    Label("New tar.gz", systemImage: "doc.badge.plus")
+                                }
+                                .buttonStyle(.bordered)
                                 Button {
                                     presentOpenPanel()
                                 } label: {
@@ -317,6 +323,8 @@ struct ContentView: View {
                 switch intent {
                 case .newDocument:
                     Task { await createNewZip() } // NEW: New Zip Creation // FIX: Added missing await to async call
+                case .newTarDocument:
+                    Task { await createNewTar() }
                 case .open:
                     presentOpenPanel()
                 case .saveAs:
@@ -519,6 +527,51 @@ struct ContentView: View {
                 } catch {
                     DispatchQueue.main.async {
                         zipReadError = "Failed to create new zip: \(error.localizedDescription)"
+                    }
+                }
+            }
+        }
+        #else
+        // Fallback for other platforms: clear state
+        zipFileURL = nil
+        zipNodes = []
+        selectedNode = nil
+        zipReadError = nil
+        #endif
+    }
+
+    // NEW: New tar.gz Creation
+    @MainActor
+    private func createNewTar() async {
+        #if canImport(AppKit)
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [
+            UTType("public.tar-archive") ?? .data,
+            UTType(filenameExtension: "tgz") ?? .gzip,
+            UTType(filenameExtension: "tar.gz") ?? .gzip,
+        ]
+        panel.nameFieldStringValue = "NewArchive.tar.gz"
+        panel.canCreateDirectories = true
+        panel.title = "Create New tar.gz Archive"
+        panel.prompt = "Create"
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                do {
+                    let fm = FileManager.default
+                    if fm.fileExists(atPath: url.path) {
+                        try fm.removeItem(at: url)
+                    }
+                    // Write an empty (gzip-compressed) tar
+                    try TarArchive.write([], to: url)
+                    DispatchQueue.main.async {
+                        zipFileURL = url
+                        zipNodes = []
+                        selectedNode = nil
+                        zipReadError = nil
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        zipReadError = "Failed to create new archive: \(error.localizedDescription)"
                     }
                 }
             }

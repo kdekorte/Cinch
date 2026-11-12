@@ -13,7 +13,7 @@ import AppKit
 
 @Observable class AppModel {
     // Menu intents to be handled by ContentView via .onReceive
-    enum Intent { case newDocument, open, save, saveAs, addFiles, quit }
+    enum Intent { case newDocument, newTarDocument, open, save, saveAs, addFiles, quit }
     var intent: Intent? = nil
 }
 
@@ -30,6 +30,8 @@ struct CinchApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("New Zip Archive") { appModel.intent = .newDocument } // NEW: New Zip Creation
                     .keyboardShortcut("n", modifiers: [.command])
+                Button("New tar.gz Archive") { appModel.intent = .newTarDocument }
+                    .keyboardShortcut("n", modifiers: [.command, .option])
 
                 Button("Open…") { appModel.intent = .open }
                     .keyboardShortcut("o", modifiers: [.command])
