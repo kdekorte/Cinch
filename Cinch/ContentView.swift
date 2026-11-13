@@ -39,6 +39,34 @@ struct ContentView: View {
     // Parent folder chosen via the outline's context menu (nil = root/selected)
     @State private var pendingNewFolderParent: ZipNode? = nil
 
+    // --- PASSWORD SUPPORT ---
+    // Password for reading encrypted entries of the open archive
+    @State private var archivePassword: String? = nil
+    // Password applied when saving (repacking) the archive; nil = no encryption
+    @State private var savePassword: String? = nil
+    // Password prompt sheet
+    @State private var showPasswordPrompt: Bool = false
+    @State private var passwordPromptTitle: String = "Password"
+    @State private var passwordPromptMessage: String = ""
+    @State private var passwordInput: String = ""
+    @State private var passwordPromptCompletion: ((String?) -> Void)? = nil
+
+    /// Shows the password prompt sheet and returns the entered password
+    /// (nil when cancelled).
+    @MainActor
+    private func promptForPassword(title: String, message: String) async -> String? {
+        await withCheckedContinuation { continuation in
+            passwordPromptTitle = title
+            passwordPromptMessage = message
+            passwordInput = ""
+            passwordPromptCompletion = { answer in
+                passwordPromptCompletion = nil
+                continuation.resume(returning: answer)
+            }
+            showPasswordPrompt = true
+        }
+    }
+
     // --- RENAME FEATURE ---
     @State private var showRenamePrompt: Bool = false
     @State private var pendingRenameNode: ZipNode? = nil
@@ -327,6 +355,23 @@ struct ContentView: View {
                     Task { await createNewZip() } // NEW: New Zip Creation // FIX: Added missing await to async call
                 case .newTarDocument:
                     Task { await createNewTar() }
+                case .setPassword:
+                    Task { @MainActor in
+                        guard let url = zipFileURL, !TarArchive.isTarURL(url) else {
+                            zipReadError = "Passwords are only supported for zip archives."
+                            return
+                        }
+                        if let password = await promptForPassword(
+                            title: "Set Archive Password",
+                            message: savePassword == nil
+                                ? "Enter a password to encrypt this archive with AES-256 when saving. Leave empty to remove encryption."
+                                : "An archive password is set. Enter a new one, or leave empty to remove encryption."
+                        ) {
+                            savePassword = password
+                            // Apply immediately by saving (repacking)
+                            await repackCurrentZipWithProgress()
+                        }
+                    }
                 case .open:
                     presentOpenPanel()
                 case .saveAs:
@@ -362,6 +407,32 @@ struct ContentView: View {
                 .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(.quaternary, lineWidth: 1))
                 .shadow(color: .black.opacity(0.2), radius: 24, y: 8)
             }
+        }
+        // Password prompt
+        .sheet(isPresented: $showPasswordPrompt) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(passwordPromptTitle).font(.headline)
+                Text(passwordPromptMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                SecureField("Password", text: $passwordInput)
+                    .textFieldStyle(.roundedBorder)
+                HStack {
+                    Spacer()
+                    Button("Cancel") {
+                        showPasswordPrompt = false
+                        passwordPromptCompletion?(nil)
+                    }
+                    .keyboardShortcut(.cancelAction)
+                    Button("OK") {
+                        showPasswordPrompt = false
+                        passwordPromptCompletion?(passwordInput.isEmpty ? nil : passwordInput)
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(20)
+            .frame(width: 320)
         }
         // NEW: Extract Feature - Alert for extraction errors
         .alert("Extraction Failed", isPresented: $showingExtractErrorAlert, actions: {
@@ -462,6 +533,32 @@ struct ContentView: View {
                         }
                         return
                     }
+                    #if canImport(zip)
+                    // zip archives: read (and decrypt) entries via libzip
+                    let fm = FileManager.default
+                    let entries = try Libzip.entries(url: zipURL)
+                    let toExtract: [ZipEntryInfo]
+                    if node.isDirectory {
+                        let prefix = node.fullPath.hasSuffix("/") ? node.fullPath : node.fullPath + "/"
+                        toExtract = entries.filter { $0.path == prefix || $0.path.hasPrefix(prefix) }
+                    } else {
+                        toExtract = entries.filter { $0.path == node.fullPath }
+                        if toExtract.isEmpty {
+                            setExtractError("Selected file not found in archive.")
+                            return
+                        }
+                    }
+                    for entry in toExtract {
+                        let dest = destinationURL.appendingPathComponent(entry.path)
+                        if entry.isDirectory {
+                            try fm.createDirectory(at: dest, withIntermediateDirectories: true)
+                        } else {
+                            try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+                            let data = try Libzip.readEntry(url: zipURL, path: entry.path, password: archivePassword)
+                            try data.write(to: dest)
+                        }
+                    }
+                    #else
                     guard let archive = try? Archive(url: zipURL, accessMode: .read, pathEncoding: nil) else {
                         setExtractError("Could not open archive for reading.")
                         return
@@ -483,6 +580,7 @@ struct ContentView: View {
                             return
                         }
                     }
+                    #endif
                 } catch {
                     setExtractError(error.localizedDescription)
                 }
@@ -516,11 +614,22 @@ struct ContentView: View {
                     if fm.fileExists(atPath: url.path) {
                         try fm.removeItem(at: url)
                     }
-                    // Create empty archive (result unused; we only need the file to exist)
+                    // Create empty archive via libzip (or ZIPFoundation fallback)
+                    #if canImport(zip)
+                    do {
+                        try Libzip.createEmptyArchive(url: url)
+                    } catch {
+                        DispatchQueue.main.async {
+                            zipReadError = "Failed to create archive at \(url.path)"
+                        }
+                        return
+                    }
+                    #else
                     guard (try? Archive(url: url, accessMode: .create, pathEncoding: nil)) != nil else {
                         zipReadError = "Failed to create archive at \(url.path)"
                         return
                     }
+                    #endif
                     DispatchQueue.main.async {
                         zipFileURL = url
                         zipNodes = []
@@ -668,6 +777,37 @@ struct ContentView: View {
                 return
             }
 
+            #if canImport(zip)
+            // zip archives: rename via libzip (native entry rename, no rewrite)
+            do {
+                let allEntries = try Libzip.entries(url: zipURL)
+                if allEntries.contains(where: { $0.path == newFullPath || $0.path.hasPrefix(newFullPath + "/") }) {
+                    zipReadError = "An entry with the new name already exists."
+                    return
+                }
+                let mappings: [(from: String, to: String)]
+                if node.isDirectory {
+                    let prefix = oldFullPath.hasSuffix("/") ? oldFullPath : oldFullPath + "/"
+                    mappings = allEntries
+                        .filter { $0.path == prefix || $0.path.hasPrefix(prefix) }
+                        .map { ($0.path, newFullPath + String($0.path.dropFirst(prefix.count))) }
+                } else {
+                    mappings = [(oldFullPath, newFullPath)]
+                }
+                try Libzip.rename(url: zipURL, mappings: mappings)
+                zipNodes = try readZipNodes(url: zipURL)
+                selectedNode = nil
+                pendingRenameNode = nil
+                newNodeName = ""
+            } catch {
+                zipReadError = "Rename failed: \(error.localizedDescription)"
+            }
+            #else
+            guard let archive = try? Archive(url: zipURL, accessMode: .update, pathEncoding: nil) else {
+                zipReadError = "Failed to open archive for update."
+                return
+            }
+
             // Check if new name already exists in archive
             if archive.contains(where: { $0.path == newFullPath }) {
                 zipReadError = "An entry with the new name already exists."
@@ -739,6 +879,7 @@ struct ContentView: View {
             selectedNode = nil
             pendingRenameNode = nil
             newNodeName = ""
+            #endif
         } catch {
             zipReadError = "Rename failed: \(error.localizedDescription)"
         }
@@ -809,6 +950,37 @@ struct ContentView: View {
             return
         }
 
+        // zip archives: native rename via libzip (no rewrite; encrypted
+        // entries keep their encryption and stay untouched)
+        #if canImport(zip)
+        do {
+            let allEntries = try Libzip.entries(url: zipURL)
+            let conflict: Bool
+            if node.isDirectory {
+                conflict = allEntries.contains { $0.path == newFullPath || $0.path.hasPrefix(newFullPath) }
+            } else {
+                conflict = allEntries.contains { $0.path == newFullPath }
+            }
+            if conflict {
+                zipReadError = "An entry named \"\(node.name)\" already exists in that folder."
+                return
+            }
+            let dirPrefix = oldFullPath.hasSuffix("/") ? oldFullPath : oldFullPath + "/"
+            let mappings: [(from: String, to: String)]
+            if node.isDirectory {
+                mappings = allEntries
+                    .filter { $0.path == dirPrefix || $0.path.hasPrefix(dirPrefix) }
+                    .map { ($0.path, newFullPath + String($0.path.dropFirst(dirPrefix.count))) }
+            } else {
+                mappings = [(oldFullPath, newFullPath)]
+            }
+            try Libzip.rename(url: zipURL, mappings: mappings)
+            zipNodes = try readZipNodes(url: zipURL)
+            ContentView.dropLogger.debug("moveZipNode: moved \(oldFullPath, privacy: .public) -> \(newFullPath, privacy: .public)")
+        } catch {
+            zipReadError = "Move failed: \(error.localizedDescription)"
+        }
+        #else
         let fm = FileManager.default
         let tempURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent(UUID().uuidString).appendingPathExtension("zip")
@@ -877,6 +1049,7 @@ struct ContentView: View {
             zipReadError = "Move failed: \(error.localizedDescription)"
             try? fm.removeItem(at: tempURL)
         }
+        #endif
     }
 
     // Helper: extract limited-size data for preview from an entry in the zip
@@ -887,6 +1060,14 @@ struct ContentView: View {
             guard entry.data.count <= maxBytes else { return nil }
             return entry.data
         }
+        #if canImport(zip)
+        // zip archives: read (and decrypt) via libzip
+        if let data = try? Libzip.readEntry(url: url, path: fullPath, password: archivePassword) {
+            guard data.count <= maxBytes else { return nil }
+            return data
+        }
+        return nil
+        #else
         guard let archive = try? Archive(url: url, accessMode: .read, pathEncoding: nil) else {
             return nil
         }
@@ -902,6 +1083,7 @@ struct ContentView: View {
             return nil
         }
         return data
+        #endif
     }
 
     // Preview generator for files in the zip
@@ -1008,6 +1190,22 @@ struct ContentView: View {
             newFolderName = "New Folder"
             return
         }
+        #if canImport(zip)
+        // zip archives: add a directory entry via libzip
+        do {
+            let existing = try Libzip.entries(url: zipURL)
+            guard !existing.contains(where: { $0.path == folderPath }) else {
+                zipReadError = "An entry named \"\(folderName)\" already exists."
+                return
+            }
+            try Libzip.addDirectory(url: zipURL, as: folderPath)
+            zipNodes = try readZipNodes(url: zipURL)
+            selectedNode = nil
+            newFolderName = "New Folder"
+        } catch {
+            zipReadError = "Failed to add folder: \(error.localizedDescription)"
+        }
+        #else
         guard let archive = try? Archive(url: zipURL, accessMode: .update, pathEncoding: nil) else { return }
         do {
             // Add directory entry with empty data
@@ -1032,6 +1230,7 @@ struct ContentView: View {
         } catch {
             zipReadError = "Failed to add folder: \(error.localizedDescription)"
         }
+        #endif
     }
 
     // Total uncompressed size of all file entries, for the status bar
@@ -1069,6 +1268,28 @@ struct ContentView: View {
             selectedNode = nil
             return
         }
+        #if canImport(zip)
+        // zip archives: delete via libzip
+        do {
+            let allEntries = try Libzip.entries(url: zipURL)
+            let paths: [String]
+            if node.isDirectory {
+                let prefix = node.fullPath.hasSuffix("/") ? node.fullPath : node.fullPath + "/"
+                paths = allEntries.filter { $0.path == prefix || $0.path.hasPrefix(prefix) }.map(\.path)
+            } else {
+                paths = [node.fullPath]
+            }
+            guard !paths.isEmpty else {
+                zipReadError = "Entry not found in archive."
+                return
+            }
+            try Libzip.delete(url: zipURL, paths: paths)
+            zipNodes = try readZipNodes(url: zipURL)
+            selectedNode = nil
+        } catch {
+            zipReadError = "Failed to remove entry: \(error.localizedDescription)"
+        }
+        #else
         guard let archive = try? Archive(url: zipURL, accessMode: .update, pathEncoding: nil) else { return }
         // Collect every entry to remove first (mutating while iterating is unsafe)
         let entriesToRemove: [ZIPFoundation.Entry]
@@ -1092,6 +1313,7 @@ struct ContentView: View {
         } catch {
             zipReadError = "Failed to remove entry: \(error.localizedDescription)"
         }
+        #endif
     }
 
     // Show an Open Panel to choose a zip file to open
@@ -1146,6 +1368,41 @@ struct ContentView: View {
             mutateTar { _ in }
             return
         }
+        #if canImport(zip)
+        // zip archives: read every entry (decrypting with the archive password)
+        // and write a fresh archive, applying the save password (AES-256) when
+        // one is set — this is how password-protected zips are saved.
+        let fm = FileManager.default
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent(UUID().uuidString).appendingPathExtension("zip")
+        do {
+            let entries = try Libzip.entries(url: sourceURL)
+            beginSaving(totalBytes: Int64(entries.reduce(0) { $0 + Int64($1.size) }))
+            try Libzip.mutate(url: tempURL) { za in
+                for entry in entries {
+                    if entry.isDirectory {
+                        try Libzip.addDirectoryToArchive(za, path: entry.path)
+                    } else {
+                        let data = try Libzip.readEntry(url: sourceURL, path: entry.path, password: archivePassword)
+                        try Libzip.addDataToArchive(za, data: data, as: entry.path, password: savePassword, modified: entry.modificationDate)
+                    }
+                }
+            }
+            if fm.fileExists(atPath: sourceURL.path) {
+                try fm.removeItem(at: sourceURL)
+            }
+            try fm.moveItem(at: tempURL, to: sourceURL)
+            // A repacked archive written with the save password needs it for
+            // reading from now on
+            if savePassword != nil { archivePassword = savePassword }
+            zipNodes = try readZipNodes(url: sourceURL)
+        } catch {
+            zipReadError = "Save failed: \(error.localizedDescription)"
+            try? fm.removeItem(at: tempURL)
+        }
+        endSaving()
+        return
+        #else
         let fm = FileManager.default
         let tempDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
         let tempURL = tempDir.appendingPathComponent(UUID().uuidString).appendingPathExtension("zip")
@@ -1189,6 +1446,7 @@ struct ContentView: View {
             try? fm.removeItem(at: tempURL)
         }
         endSaving()
+        #endif
     }
 
     // Repack the current zip to a temp file and atomically replace the original
@@ -1356,7 +1614,42 @@ struct ContentView: View {
 
     @MainActor
     private func loadZip(at url: URL) async {
+        // Reset password state when opening a (different) archive
+        archivePassword = nil
+        savePassword = nil
         do {
+            // Encrypted zip: prompt for a password and verify it before
+            // showing the tree, so later operations can decrypt silently
+            #if canImport(zip)
+            if !TarArchive.isTarURL(url), let entries = try? Libzip.entries(url: url),
+               let firstEncrypted = entries.first(where: { $0.isEncrypted }) {
+                var attempts = 0
+                while true {
+                    guard let password = await promptForPassword(
+                        title: "Password Required",
+                        message: "\"\(url.lastPathComponent)\" contains encrypted entries. Enter the password to open it."
+                    ) else {
+                        zipNodes = []
+                        selectedNode = nil
+                        zipReadError = "Password required to open this archive."
+                        return
+                    }
+                    do {
+                        _ = try Libzip.readEntry(url: url, path: firstEncrypted.path, password: password)
+                        archivePassword = password
+                        break
+                    } catch {
+                        attempts += 1
+                        if attempts >= 3 {
+                            zipNodes = []
+                            selectedNode = nil
+                            zipReadError = "Wrong password."
+                            return
+                        }
+                    }
+                }
+            }
+            #endif
             zipFileURL = url
             zipNodes = try readZipNodes(url: url)
             selectedNode = nil
@@ -1364,7 +1657,7 @@ struct ContentView: View {
         } catch {
             zipNodes = []
             selectedNode = nil
-            zipReadError = "Failed to read zip file: \(error.localizedDescription)"
+            zipReadError = "Failed to read archive: \(error.localizedDescription)"
         }
     }
 
@@ -1403,11 +1696,6 @@ struct ContentView: View {
             }
             return
         }
-        guard let archive = try? Archive(url: zipURL, accessMode: .update, pathEncoding: nil) else {
-            ContentView.dropLogger.error("addFileToZip: could not open archive for update: \(zipURL.path, privacy: .public)")
-            zipReadError = "Could not open \(zipURL.lastPathComponent) for writing."
-            return
-        }
         let fileName = fileURL.lastPathComponent
         let targetPath: String
         if let prefix = pathPrefix {
@@ -1416,17 +1704,29 @@ struct ContentView: View {
         } else {
             targetPath = fileName
         }
+        #if canImport(zip)
+        // zip archives: add via libzip (ZIP_FL_OVERWRITE replaces same-name entries)
         do {
-            // FIX: Use minimal addEntry signature WITHOUT compressionMethod property to avoid build errors
-            try archive.addEntry(with: targetPath, relativeTo: fileURL.deletingLastPathComponent())
+            try Libzip.addFile(url: zipURL, from: fileURL, as: targetPath)
             ContentView.dropLogger.debug("addFileToZip: added entry \(targetPath, privacy: .public)")
-            // refresh tree
             zipNodes = try readZipNodes(url: zipURL)
-            ContentView.dropLogger.debug("addFileToZip: refreshed tree, \(self.zipNodes.count, privacy: .public) root node(s)")
         } catch {
             ContentView.dropLogger.error("addFileToZip: failed: \(error.localizedDescription, privacy: .public)")
             zipReadError = "Failed to add file: \(error.localizedDescription)"
         }
+        #else
+        guard let archive = try? Archive(url: zipURL, accessMode: .update, pathEncoding: nil) else {
+            zipReadError = "Could not open \(zipURL.lastPathComponent) for writing."
+            return
+        }
+        do {
+            // FIX: Use minimal addEntry signature WITHOUT compressionMethod property to avoid build errors
+            try archive.addEntry(with: targetPath, relativeTo: fileURL.deletingLastPathComponent())
+            zipNodes = try readZipNodes(url: zipURL)
+        } catch {
+            zipReadError = "Failed to add file: \(error.localizedDescription)"
+        }
+        #endif
     }
 
     // NEW: Drag and Drop Add - Add folder recursively to zip
@@ -1459,6 +1759,29 @@ struct ContentView: View {
             }
             return
         }
+        #if canImport(zip)
+        // zip archives: add the folder's contents via libzip in one session
+        let fm = FileManager.default
+        let enumerator = fm.enumerator(at: folderURL, includingPropertiesForKeys: nil)
+        do {
+            let base = folderURL.deletingLastPathComponent().path + "/"
+            try Libzip.mutate(url: zipURL) { za in
+                while let item = enumerator?.nextObject() as? URL {
+                    var isDir: ObjCBool = false
+                    guard fm.fileExists(atPath: item.path, isDirectory: &isDir) else { continue }
+                    let relativePath = item.path.replacingOccurrences(of: base, with: "")
+                    if isDir.boolValue {
+                        try Libzip.addDirectoryToArchive(za, path: relativePath + "/")
+                    } else {
+                        try Libzip.addFileToArchive(za, from: item, as: relativePath)
+                    }
+                }
+            }
+            zipNodes = try readZipNodes(url: zipURL)
+        } catch {
+            zipReadError = "Failed to add folder to zip: \(error.localizedDescription)"
+        }
+        #else
         guard let archive = try? Archive(url: zipURL, accessMode: .update, pathEncoding: nil) else { return }
         let fm = FileManager.default
 
@@ -1485,6 +1808,7 @@ struct ContentView: View {
         } catch {
             zipReadError = "Failed to add folder to zip: \(error.localizedDescription)"
         }
+        #endif
     }
 }
 
@@ -1582,6 +1906,14 @@ func readZipNodes(url: URL) throws -> [ZipNode] {
             insertEntry(pathComponents, isDirectory: tarEntry.isDirectory, root: &root, fullPath: tarEntry.path, size: tarEntry.isDirectory ? nil : Int64(tarEntry.data.count), modificationDate: tarEntry.modificationDate)
         }
     } else {
+        #if canImport(zip)
+        // zip archives: list via libzip (also reports encryption state)
+        for entry in try Libzip.entries(url: url) {
+            if isMacOSMetadataPath(entry.path) { continue }
+            let pathComponents = entry.path.split(separator: "/").map(String.init)
+            insertEntry(pathComponents, isDirectory: entry.isDirectory, root: &root, fullPath: entry.path, size: entry.isDirectory ? nil : Int64(entry.size), modificationDate: entry.modificationDate)
+        }
+        #else
         guard let archive = try? Archive(url: url, accessMode: .read, pathEncoding: nil) else {
             throw CocoaError(.fileReadCorruptFile)
         }
@@ -1592,6 +1924,7 @@ func readZipNodes(url: URL) throws -> [ZipNode] {
             let modDate: Date? = entry.fileAttributes[.modificationDate] as? Date
             insertEntry(pathComponents, isDirectory: entry.path.hasSuffix("/"), root: &root, fullPath: entry.path, size: size, modificationDate: modDate)
         }
+        #endif
     }
 
     return root.values.sorted { a, b in

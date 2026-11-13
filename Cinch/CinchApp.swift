@@ -13,7 +13,7 @@ import AppKit
 
 @Observable class AppModel {
     // Menu intents to be handled by ContentView via .onReceive
-    enum Intent { case newDocument, newTarDocument, open, save, saveAs, addFiles, quit }
+    enum Intent { case newDocument, newTarDocument, open, save, saveAs, addFiles, setPassword, quit }
     var intent: Intent? = nil
 }
 
@@ -46,6 +46,7 @@ struct CinchApp: App {
             }
 
             CommandGroup(after: .saveItem) {
+                Button("Set Password…") { appModel.intent = .setPassword }
                 Button("Add Files to Zip…") { appModel.intent = .addFiles }
                     .keyboardShortcut("a", modifiers: [.command])
             }
