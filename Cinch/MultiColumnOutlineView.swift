@@ -33,6 +33,8 @@ struct MultiColumnOutlineView: NSViewRepresentable {
     // DRAG-OUT SUPPORT: extracts a node (file or folder, recursively) to a
     // temporary location and returns its URL; nil aborts the drag
     private let nodeTempURLProvider: (ZipNode) -> URL?
+    // DOUBLE-CLICK: open a file in its default application
+    private let onOpenNode: (ZipNode) -> Void
 
     // Pasteboard type used to recognize drags that originate from this outline view
     static let movePasteboardType = NSPasteboard.PasteboardType("com.kdekorte.cinch.zipnode")
@@ -46,7 +48,8 @@ struct MultiColumnOutlineView: NSViewRepresentable {
         onMoveNodes: @escaping ([ZipNode], ZipNode?) -> Void = { _, _ in },
         onCreateFolder: @escaping (ZipNode?) -> Void = { _ in },
         onRename: @escaping (ZipNode) -> Void = { _ in },
-        nodeTempURLProvider: @escaping (ZipNode) -> URL? = { _ in nil }
+        nodeTempURLProvider: @escaping (ZipNode) -> URL? = { _ in nil },
+        onOpenNode: @escaping (ZipNode) -> Void = { _ in }
     ) {
         self.roots = roots
         self._selected = selected
@@ -57,6 +60,7 @@ struct MultiColumnOutlineView: NSViewRepresentable {
         self.onCreateFolder = onCreateFolder
         self.onRename = onRename
         self.nodeTempURLProvider = nodeTempURLProvider
+        self.onOpenNode = onOpenNode
     }
 
     func makeCoordinator() -> Coordinator {
@@ -118,6 +122,10 @@ struct MultiColumnOutlineView: NSViewRepresentable {
         // the list. Accept drops here instead and forward them to the SwiftUI layer.
         outlineView.setDraggingSourceOperationMask(.copy, forLocal: false)
         outlineView.setDraggingSourceOperationMask([.copy, .move], forLocal: true)
+
+        // Double-click: open files in their default application
+        outlineView.doubleAction = #selector(Coordinator.doubleClickAction(_:))
+        outlineView.target = context.coordinator
 
         scrollView.documentView = outlineView
 
@@ -528,6 +536,22 @@ struct MultiColumnOutlineView: NSViewRepresentable {
             parent().onRename(node)
         }
 
+        // Double-click: files open in the default app; folders toggle expansion
+        @objc func doubleClickAction(_ sender: Any?) {
+            guard let outlineView = sender as? NSOutlineView else { return }
+            let row = outlineView.clickedRow
+            guard row >= 0, let node = outlineView.item(atRow: row) as? ZipNode else { return }
+            if node.isDirectory {
+                if outlineView.isItemExpanded(node) {
+                    outlineView.collapseItem(node)
+                } else {
+                    outlineView.expandItem(node)
+                }
+            } else {
+                parent().onOpenNode(node)
+            }
+        }
+
         @objc private func removeAction(_ sender: NSMenuItem) {
             parent().onRemove()
         }
@@ -823,7 +847,8 @@ struct MultiColumnOutlineView: View {
         onMoveNodes: @escaping ([ZipNode], ZipNode?) -> Void = { _, _ in },
         onCreateFolder: @escaping (ZipNode?) -> Void = { _ in },
         onRename: @escaping (ZipNode) -> Void = { _ in },
-        nodeTempURLProvider: @escaping (ZipNode) -> URL? = { _ in nil }
+        nodeTempURLProvider: @escaping (ZipNode) -> URL? = { _ in nil },
+        onOpenNode: @escaping (ZipNode) -> Void = { _ in }
     ) {}
 
     var body: some View {

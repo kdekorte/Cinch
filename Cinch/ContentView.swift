@@ -226,6 +226,9 @@ struct ContentView: View {
                         },
                         nodeTempURLProvider: { node in
                             extractNodeToTemporaryURL(node: node)
+                        },
+                        onOpenNode: { node in
+                            openNodeInDefaultApp(node)
                         }
                     )
                     // NEW: Context menu for Add Folder on directories and Rename option for any node
@@ -1497,6 +1500,19 @@ struct ContentView: View {
             // Cleanup temp on failure
             try? fm.removeItem(at: tempURL)
         }
+    }
+
+    // DOUBLE-CLICK: extract a file to a temp location and open it in the
+    // default application (Preview for PDFs, TextEdit for text, …)
+    private func openNodeInDefaultApp(_ node: ZipNode) {
+        guard !node.isDirectory else { return }
+        guard let url = extractNodeToTemporaryURL(node: node) else {
+            zipReadError = "Could not extract \"\(node.name)\" to open it."
+            return
+        }
+        #if canImport(AppKit)
+        NSWorkspace.shared.open(url)
+        #endif
     }
 
     // DRAG-OUT SUPPORT: extract a node (file or folder, recursively) to a
