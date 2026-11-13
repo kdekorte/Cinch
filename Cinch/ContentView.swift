@@ -223,6 +223,9 @@ struct ContentView: View {
                             pendingRenameNode = node
                             newNodeName = node.name
                             showRenamePrompt = true
+                        },
+                        nodeTempURLProvider: { node in
+                            extractNodeToTemporaryURL(node: node)
                         }
                     )
                     // NEW: Context menu for Add Folder on directories and Rename option for any node
@@ -1493,6 +1496,73 @@ struct ContentView: View {
             zipReadError = "Save failed: \(error.localizedDescription)"
             // Cleanup temp on failure
             try? fm.removeItem(at: tempURL)
+        }
+    }
+
+    // DRAG-OUT SUPPORT: extract a node (file or folder, recursively) to a
+    // temporary location so it can be dragged to the Finder. Handles zip
+    // (decrypting with the session password) and tar archives.
+    private func extractNodeToTemporaryURL(node: ZipNode) -> URL? {
+        guard let archiveURL = zipFileURL else { return nil }
+        let fm = FileManager.default
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("CinchDragOut-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            let destURL = tempDir.appendingPathComponent(node.name, isDirectory: node.isDirectory)
+
+            if TarArchive.isTarURL(archiveURL) {
+                let entries = try TarArchive.read(url: archiveURL)
+                if node.isDirectory {
+                    let prefix = node.fullPath.hasSuffix("/") ? node.fullPath : node.fullPath + "/"
+                    try fm.createDirectory(at: destURL, withIntermediateDirectories: true)
+                    for entry in entries where entry.path.hasPrefix(prefix) {
+                        let relative = String(entry.path.dropFirst(prefix.count))
+                        guard !relative.isEmpty else { continue }
+                        let target = destURL.appendingPathComponent(relative)
+                        if entry.isDirectory {
+                            try fm.createDirectory(at: target, withIntermediateDirectories: true)
+                        } else {
+                            try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                            try entry.data.write(to: target)
+                        }
+                    }
+                } else if let entry = entries.first(where: { $0.path == node.fullPath }) {
+                    try entry.data.write(to: destURL)
+                } else {
+                    return nil
+                }
+            } else {
+                #if canImport(zip)
+                if node.isDirectory {
+                    let allEntries = try Libzip.entries(url: archiveURL)
+                    let prefix = node.fullPath.hasSuffix("/") ? node.fullPath : node.fullPath + "/"
+                    try fm.createDirectory(at: destURL, withIntermediateDirectories: true)
+                    for entry in allEntries where entry.path.hasPrefix(prefix) {
+                        let relative = String(entry.path.dropFirst(prefix.count))
+                        guard !relative.isEmpty else { continue }
+                        let target = destURL.appendingPathComponent(relative)
+                        if entry.isDirectory {
+                            try fm.createDirectory(at: target, withIntermediateDirectories: true)
+                        } else {
+                            try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                            let data = try Libzip.readEntry(url: archiveURL, path: entry.path, password: archivePassword)
+                            try data.write(to: target)
+                        }
+                    }
+                } else {
+                    let data = try Libzip.readEntry(url: archiveURL, path: node.fullPath, password: archivePassword)
+                    try data.write(to: destURL)
+                }
+                #else
+                return nil
+                #endif
+            }
+            return destURL
+        } catch {
+            ContentView.dropLogger.error("drag-out extract failed for \(node.name, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            try? fm.removeItem(at: tempDir)
+            return nil
         }
     }
 

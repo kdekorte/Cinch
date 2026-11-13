@@ -30,6 +30,9 @@ struct MultiColumnOutlineView: NSViewRepresentable {
     private let onCreateFolder: (ZipNode?) -> Void
     // CONTEXT MENU: rename the given node
     private let onRename: (ZipNode) -> Void
+    // DRAG-OUT SUPPORT: extracts a node (file or folder, recursively) to a
+    // temporary location and returns its URL; nil aborts the drag
+    private let nodeTempURLProvider: (ZipNode) -> URL?
 
     // Pasteboard type used to recognize drags that originate from this outline view
     static let movePasteboardType = NSPasteboard.PasteboardType("com.kdekorte.cinch.zipnode")
@@ -42,7 +45,8 @@ struct MultiColumnOutlineView: NSViewRepresentable {
         onDropFiles: @escaping ([URL], ZipNode?) -> Void = { _, _ in },
         onMoveNodes: @escaping ([ZipNode], ZipNode?) -> Void = { _, _ in },
         onCreateFolder: @escaping (ZipNode?) -> Void = { _ in },
-        onRename: @escaping (ZipNode) -> Void = { _ in }
+        onRename: @escaping (ZipNode) -> Void = { _ in },
+        nodeTempURLProvider: @escaping (ZipNode) -> URL? = { _ in nil }
     ) {
         self.roots = roots
         self._selected = selected
@@ -52,6 +56,7 @@ struct MultiColumnOutlineView: NSViewRepresentable {
         self.onMoveNodes = onMoveNodes
         self.onCreateFolder = onCreateFolder
         self.onRename = onRename
+        self.nodeTempURLProvider = nodeTempURLProvider
     }
 
     func makeCoordinator() -> Coordinator {
@@ -689,7 +694,9 @@ struct MultiColumnOutlineView: NSViewRepresentable {
             let pasteboardItem = NSPasteboardItem()
             pasteboardItem.setData(Data(node.fullPath.utf8), forType: MultiColumnOutlineView.movePasteboardType)
 
-            if let url = extractNodeToTemporaryURL(node: node) {
+            // Real extraction into a temp location (see ContentView's
+            // extractNodeToTemporaryURL — zip, tar and passwords included)
+            if let url = parent().nodeTempURLProvider(node) {
                 // Keep the URLs alive for the duration of drag
                 dragTempURLs = [url]
                 pasteboardItem.setString(url.absoluteString, forType: .fileURL)
@@ -798,65 +805,6 @@ struct MultiColumnOutlineView: NSViewRepresentable {
             return true
         }
 
-        // Helper function to extract a ZipNode (file or folder) to a temporary location.
-        // If folder, recursively extracts all contents.
-        private func extractNodeToTemporaryURL(node: ZipNode) -> URL? {
-            // Create a unique temporary directory for the drag
-            let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("MultiColumnOutlineViewDragTemp", isDirectory: true)
-            let fileManager = FileManager.default
-            do {
-                if fileManager.fileExists(atPath: tempDir.path) {
-                    try fileManager.removeItem(at: tempDir)
-                }
-                try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true, attributes: nil)
-            } catch {
-                return nil
-            }
-
-            if node.isDirectory {
-                // Extract folder recursively into a temp folder
-                let destURL = tempDir.appendingPathComponent(node.name, isDirectory: true)
-                do {
-                    try extractNodeRecursively(node: node, toURL: destURL)
-                    return destURL
-                } catch {
-                    return nil
-                }
-            } else {
-                // Extract single file to temp file
-                let destURL = tempDir.appendingPathComponent(node.name, isDirectory: false)
-                do {
-                    try extractFileNode(node: node, toURL: destURL)
-                    return destURL
-                } catch {
-                    return nil
-                }
-            }
-        }
-
-        // Recursively extracts a folder node and its children to destination URL
-        private func extractNodeRecursively(node: ZipNode, toURL url: URL) throws {
-            let fileManager = FileManager.default
-            try fileManager.createDirectory(at: url, withIntermediateDirectories: true, attributes: nil)
-
-            if let children = node.children {
-                for child in children {
-                    let childURL = url.appendingPathComponent(child.name, isDirectory: child.isDirectory)
-                    if child.isDirectory {
-                        try extractNodeRecursively(node: child, toURL: childURL)
-                    } else {
-                        try extractFileNode(node: child, toURL: childURL)
-                    }
-                }
-            }
-        }
-
-        // Extracts a single file node to destination URL
-        private func extractFileNode(node: ZipNode, toURL url: URL) throws {
-            // -- FIX: Removed usage of node.data which does not exist --
-            // Create empty file as fallback since no data access
-            FileManager.default.createFile(atPath: url.path, contents: nil, attributes: nil)
-        }
 
         // --- END ---
     }
@@ -874,7 +822,8 @@ struct MultiColumnOutlineView: View {
         onDropFiles: @escaping ([URL], ZipNode?) -> Void = { _, _ in },
         onMoveNodes: @escaping ([ZipNode], ZipNode?) -> Void = { _, _ in },
         onCreateFolder: @escaping (ZipNode?) -> Void = { _ in },
-        onRename: @escaping (ZipNode) -> Void = { _ in }
+        onRename: @escaping (ZipNode) -> Void = { _ in },
+        nodeTempURLProvider: @escaping (ZipNode) -> URL? = { _ in nil }
     ) {}
 
     var body: some View {
