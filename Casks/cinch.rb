@@ -1,7 +1,7 @@
 cask "cinch" do
-  version "1.0"
+  version "1.1"
   # Re-generate for every release with scripts/release.sh (it prints the sha256)
-  sha256 "8e6f98cf6010b85ef24559416da187a0d6aef054c82527cc3f16921fd8e4e41b"
+  sha256 "3eb27d0ef70a6faa0efe9645ed619860fa486cfb292ea26f6b18361aafa3f7c0"
 
   url "https://github.com/kdekorte/Cinch/releases/download/v#{version}/Cinch-#{version}.zip"
   name "Cinch"
