@@ -3,6 +3,9 @@ import Foundation
 import ZIPFoundation
 import UniformTypeIdentifiers
 import os
+#if canImport(zip)
+import zip
+#endif
 #if canImport(AppKit)
 import AppKit
 #endif

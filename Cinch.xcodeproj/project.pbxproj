@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		5957693D30055AF3008BDE3B /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = 5957693C30055AF3008BDE3B /* ZIPFoundation */; };
+		5A10000130000000000000001 /* SwiftZip in Frameworks */ = {isa = PBXBuildFile; productRef = 5A10000230000000000000001 /* SwiftZip */; };
+		5A10000330000000000000001 /* zip in Frameworks */ = {isa = PBXBuildFile; productRef = 5A10000430000000000000001 /* zip */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -70,6 +72,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				5957693D30055AF3008BDE3B /* ZIPFoundation in Frameworks */,
+				5A10000130000000000000001 /* SwiftZip in Frameworks */,
+				5A10000330000000000000001 /* zip in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -139,6 +143,8 @@
 			name = Cinch;
 			packageProductDependencies = (
 				5957693C30055AF3008BDE3B /* ZIPFoundation */,
+				5A10000230000000000000001 /* SwiftZip */,
+				5A10000430000000000000001 /* zip */,
 			);
 			productName = Cinch;
 			productReference = 59576910300557C9008BDE3B /* Cinch.app */;
@@ -224,6 +230,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				5957693A300558ED008BDE3B /* XCRemoteSwiftPackageReference "ZIPFoundation" */,
+				5A10000530000000000000001 /* XCRemoteSwiftPackageReference "SwiftZip" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 59576911300557C9008BDE3B /* Products */;
@@ -622,7 +629,15 @@
 			repositoryURL = "https://github.com/weichsel/ZIPFoundation";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 0.9.20;
+				minimumVersion = 0.9.0;
+			};
+		};
+		5A10000530000000000000001 /* XCRemoteSwiftPackageReference "SwiftZip" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/SwiftZip/SwiftZip.git";
+			requirement = {
+				kind = branch;
+				branch = master;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
@@ -632,6 +647,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 5957693A300558ED008BDE3B /* XCRemoteSwiftPackageReference "ZIPFoundation" */;
 			productName = ZIPFoundation;
+		};
+		5A10000230000000000000001 /* SwiftZip */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5A10000530000000000000001 /* XCRemoteSwiftPackageReference "SwiftZip" */;
+			productName = SwiftZip;
+		};
+		5A10000430000000000000001 /* zip */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5A10000530000000000000001 /* XCRemoteSwiftPackageReference "SwiftZip" */;
+			productName = zip;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

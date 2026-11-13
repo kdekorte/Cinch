@@ -1,6 +1,15 @@
 {
-  "originHash" : "d0d4edfdf2bf3cd05b3ba2dec0af1a9c271c93f944cbba8677cc647f74a6b323",
+  "originHash" : "af34f8e7609329b398f848b99de7efbf823444c6cb43d08b2fbcf90ff0f7e0e1",
   "pins" : [
+    {
+      "identity" : "swiftzip",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/SwiftZip/SwiftZip.git",
+      "state" : {
+        "branch" : "master",
+        "revision" : "97c2303d0fcc0bb6ae78a93ee10bdb91a1467c8f"
+      }
+    },
     {
       "identity" : "zipfoundation",
       "kind" : "remoteSourceControl",
