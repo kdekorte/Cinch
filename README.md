@@ -94,18 +94,94 @@ For distribution to other people, sign the app with a "Developer ID Application"
 certificate and notarize it before running the release script (`codesign`,
 `xcrun notarytool`, `xcrun stapler`); the script's header documents the commands.
 
+## MCP server (`cinch-mcp`)
+
+Cinch's archive engines are also exposed as an **MCP (Model Context Protocol) server** over stdio, so AI agents such as Cline, Claude Code or Claude Desktop can browse, create, edit and extract zip and tar/tar.gz archives through the same battle-tested code the app uses (libzip for zip incl. AES-256 passwords, the built-in ustar/gzip engine for tar).
+
+### Bundled with the app
+
+`scripts/build.sh` builds the server **into the app bundle** — a universal (arm64 + x86_64) binary at `Cinch.app/Contents/MacOS/cinch-mcp`, signed without the app's sandbox entitlements so MCP clients can launch it directly with full file access. Every build, release zip and .pkg therefore ships it:
+
+```sh
+scripts/build.sh                 # build/Cinch.app/Contents/MacOS/cinch-mcp
+```
+
+After installing Cinch to `/Applications`, point clients at:
+
+```
+/Applications/Cinch.app/Contents/MacOS/cinch-mcp
+```
+
+### Building it standalone
+
+The package reuses the engine sources in `Cinch/` via Swift Package Manager:
+
+```sh
+swift build            # debug binary at .build/debug/cinch-mcp
+swift build -c release # release binary at .build/.../Release/cinch-mcp
+```
+
+Run the full end-to-end smoke test (handshake + every tool, verified against the system `zip`/`tar` tools; set `MCP_BIN` to test a specific binary such as the bundled one):
+
+```sh
+scripts/mcp-smoke.sh
+```
+
+### Tools
+
+| Tool | What it does |
+|---|---|
+| `archive_list` | List entries (path, kind, size, mtime, zip encryption) |
+| `archive_read` | Read one entry — text as UTF-8, binary as base64 (password support) |
+| `archive_extract` | Extract entries (or everything) to a directory; unsafe paths are skipped |
+| `archive_create` | Create a new zip / tar / tar.gz from disk files/folders |
+| `archive_add` | Add disk files/folders to an existing archive |
+| `archive_write_file` | Write text or base64 content into an entry |
+| `archive_delete` | Delete entries (folders recursively) |
+| `archive_rename` | Rename entries/folders |
+| `archive_new_folder` | Create a folder inside an archive |
+| `archive_set_password` | Re-encrypt a zip AES-256 (empty password removes encryption) |
+
+### Configuring clients
+
+Cline (`cline_mcp_settings.json`) or Claude Desktop (`claude_desktop_config.json`) — using the bundled binary once Cinch is installed in `/Applications`:
+
+```json
+{
+  "mcpServers": {
+    "cinch": {
+      "command": "/Applications/Cinch.app/Contents/MacOS/cinch-mcp"
+    }
+  }
+}
+```
+
+Claude Code:
+
+```sh
+claude mcp add cinch -- /Applications/Cinch.app/Contents/MacOS/cinch-mcp
+```
+
+Passwords are passed per tool call and never persisted, matching the app's session-memory-only policy. macOS metadata entries (`__MACOSX`, `._*` AppleDouble files) are hidden from listings, as in the app.
+
 ## Project structure
 
 ```
 Cinch/
+├── Package.swift                 # SPM package: CinchCore (engines) + cinch-mcp server
 ├── Cinch/
 │   ├── CinchApp.swift            # App entry point, menu commands, AppModel intents
 │   ├── ContentView.swift         # Main UI: archive browsing, editing, drag & drop, saving
+│   ├── LibzipArchive.swift       # libzip facade (zip engine, passwords) — shared with cinch-mcp
+│   ├── TarArchive.swift          # ustar/tar.gz engine — shared with cinch-mcp
+│   ├── GzipArchive.swift         # RFC 1952 gzip container — used by TarArchive
 │   └── MultiColumnOutlineView.swift  # NSOutlineView-backed multi-column list (macOS only)
+├── cinch-mcp/                    # MCP stdio server for AI agents (Cline, Claude, …)
 ├── Casks/
 │   └── cinch.rb                  # Homebrew cask (this repo is the tap)
 ├── scripts/
 │   ├── build.sh                  # Command-line build script
+│   ├── mcp-smoke.sh              # End-to-end test of the cinch-mcp server
 │   └── release.sh                # Build, zip and checksum a release artifact
 ├── CinchTests/                   # Swift Testing unit tests
 ├── CinchUITests/                 # UI launch tests

@@ -8,6 +8,8 @@
 #   scripts/build.sh clean        Remove build artifacts
 #
 # Output: build/Cinch.app (and build/Cinch.app.dSYM if present)
+#         — includes the bundled cinch-mcp MCP server at
+#           build/Cinch.app/Contents/MacOS/cinch-mcp
 # Optional: set ZIP=1 to also produce build/Cinch-<version>.zip
 
 set -euo pipefail
@@ -54,6 +56,27 @@ cp -R "$APP" "$OUT_DIR/Cinch.app"
 if [[ -d "$APP.dSYM" ]]; then
   cp -R "$APP.dSYM" "$OUT_DIR/Cinch.app.dSYM"
 fi
+
+# Bundle the cinch-mcp MCP server into the app (Contents/MacOS/cinch-mcp)
+# so AI clients (Cline, Claude, ...) can use one installed app for both the
+# GUI and the server. Built universal (arm64 + x86_64) to match the app.
+echo
+echo "==> Building cinch-mcp (Release, universal)"
+swift build -c release --arch arm64 --arch x86_64
+# Build layout differs by Swift version: new (.build/out/Products) vs classic (.build/apple/Products)
+MCP_BIN="$ROOT/.build/out/Products/Release/cinch-mcp"
+[[ -x "$MCP_BIN" ]] || MCP_BIN="$ROOT/.build/apple/Products/Release/cinch-mcp"
+if [[ ! -x "$MCP_BIN" ]]; then
+  echo "error: cinch-mcp release binary not found" >&2
+  exit 1
+fi
+cp "$MCP_BIN" "$OUT_DIR/Cinch.app/Contents/MacOS/cinch-mcp"
+# Sign the helper ad-hoc WITHOUT the app's sandbox entitlements: MCP clients
+# launch it directly and it needs access to arbitrary user-specified paths.
+# (For distribution, re-sign the whole app with your Developer ID certificate
+# after this step, as documented in scripts/release.sh.)
+codesign --force --sign - --identifier com.kdekorte.Cinch.mcp-server \
+  --timestamp=none "$OUT_DIR/Cinch.app/Contents/MacOS/cinch-mcp"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
   "$OUT_DIR/Cinch.app/Contents/Info.plist" 2>/dev/null || echo 1.0)"

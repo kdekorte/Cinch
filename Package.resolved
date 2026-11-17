@@ -1,0 +1,14 @@
+{
+  "pins" : [
+    {
+      "identity" : "swiftzip",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/SwiftZip/SwiftZip.git",
+      "state" : {
+        "branch" : "master",
+        "revision" : "97c2303d0fcc0bb6ae78a93ee10bdb91a1467c8f"
+      }
+    }
+  ],
+  "version" : 2
+}

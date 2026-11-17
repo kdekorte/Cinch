@@ -12,7 +12,7 @@ import Foundation
 import zip
 
 /// Encryption method of a zip entry.
-enum ZipEncryption: Equatable {
+public enum ZipEncryption: Equatable {
     case none
     case traditional  // legacy ZipCrypto
     case aes128
@@ -20,7 +20,7 @@ enum ZipEncryption: Equatable {
     case aes256
     case unknown(UInt16)
 
-    init(raw: UInt16) {
+    public init(raw: UInt16) {
         switch raw {
         case 0: self = .none
         case 1: self = .traditional
@@ -32,23 +32,23 @@ enum ZipEncryption: Equatable {
     }
 }
 
-struct ZipEntryInfo {
-    var path: String
-    var size: Int
-    var modificationDate: Date
-    var encryption: ZipEncryption
+public struct ZipEntryInfo {
+    public var path: String
+    public var size: Int
+    public var modificationDate: Date
+    public var encryption: ZipEncryption
 
-    var isDirectory: Bool { path.hasSuffix("/") }
-    var isEncrypted: Bool { encryption != .none }
+    public var isDirectory: Bool { path.hasSuffix("/") }
+    public var isEncrypted: Bool { encryption != .none }
 }
 
-enum LibzipError: Error, LocalizedError {
+public enum LibzipError: Error, LocalizedError {
     case openFailed(String)
     case entryNotFound(String)
     case wrongPassword
     case failed(String)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .openFailed(let path): return "Could not open archive \(path)"
         case .entryNotFound(let path): return "Entry not found: \(path)"
@@ -58,7 +58,7 @@ enum LibzipError: Error, LocalizedError {
     }
 }
 
-enum Libzip {
+public enum Libzip {
 
     // MARK: - Helpers
 
@@ -102,7 +102,7 @@ enum Libzip {
     // MARK: - Reading
 
     /// Lists every entry in the archive (no password needed).
-    static func entries(url: URL) throws -> [ZipEntryInfo] {
+    public static func entries(url: URL) throws -> [ZipEntryInfo] {
         let za = try openArchive(url, readOnly: true)
         defer { zip_discard(za) }
 
@@ -125,12 +125,12 @@ enum Libzip {
     }
 
     /// True if any entry in the archive is encrypted.
-    static func hasEncryptedEntries(url: URL) -> Bool {
+    public static func hasEncryptedEntries(url: URL) -> Bool {
         (try? entries(url: url))?.contains { $0.isEncrypted } ?? false
     }
 
     /// Reads one entry's data, decrypting with the password when needed.
-    static func readEntry(url: URL, path: String, password: String?) throws -> Data {
+    public static func readEntry(url: URL, path: String, password: String?) throws -> Data {
         let za = try openArchive(url, readOnly: true)
         defer { zip_discard(za) }
 
@@ -180,7 +180,7 @@ extension Libzip {
 
     /// Applies changes to the archive and commits them.
     /// The transform receives the open archive handle and may throw.
-    static func mutate(url: URL, _ changes: (OpaquePointer) throws -> Void) throws {
+    public static func mutate(url: URL, _ changes: (OpaquePointer) throws -> Void) throws {
         let za = try openArchive(url, readOnly: false)
         var thrown: Error? = nil
         do {
@@ -201,7 +201,7 @@ extension Libzip {
 
     /// Adds a file from disk. When a password is given the entry is written
     /// AES-256 encrypted.
-    static func addFile(url: URL, from fileURL: URL, as path: String, password: String? = nil) throws {
+    public static func addFile(url: URL, from fileURL: URL, as path: String, password: String? = nil) throws {
         try mutate(url: url) { za in
             try addFileToArchive(za, from: fileURL, as: path, password: password)
         }
@@ -209,21 +209,21 @@ extension Libzip {
 
     /// Adds an in-memory entry. When a password is given the entry is written
     /// AES-256 encrypted.
-    static func addData(url: URL, data: Data, as path: String, password: String? = nil, modified: Date? = nil) throws {
+    public static func addData(url: URL, data: Data, as path: String, password: String? = nil, modified: Date? = nil) throws {
         try mutate(url: url) { za in
             try addDataToArchive(za, data: data, as: path, password: password, modified: modified)
         }
     }
 
     /// Adds a directory entry.
-    static func addDirectory(url: URL, as path: String) throws {
+    public static func addDirectory(url: URL, as path: String) throws {
         try mutate(url: url) { za in
             try addDirectoryToArchive(za, path: path)
         }
     }
 
     /// Deletes the entries at the given paths (collect indices first).
-    static func delete(url: URL, paths: [String]) throws {
+    public static func delete(url: URL, paths: [String]) throws {
         try mutate(url: url) { za in
             for path in paths {
                 let index = locate(za, path: path)
@@ -236,7 +236,7 @@ extension Libzip {
     }
 
     /// Renames entries: each pair maps an existing path to a new one.
-    static func rename(url: URL, mappings: [(from: String, to: String)]) throws {
+    public static func rename(url: URL, mappings: [(from: String, to: String)]) throws {
         try mutate(url: url) { za in
             for mapping in mappings {
                 let index = locate(za, path: mapping.from)
@@ -253,13 +253,13 @@ extension Libzip {
     }
 
     /// Creates an empty archive at the given URL.
-    static func createEmptyArchive(url: URL) throws {
+    public static func createEmptyArchive(url: URL) throws {
         try mutate(url: url) { _ in }
     }
 
     // MARK: - Per-archive-handle helpers (used inside mutate)
 
-    static func addFileToArchive(_ za: OpaquePointer, from fileURL: URL, as path: String, password: String? = nil) throws {
+    public static func addFileToArchive(_ za: OpaquePointer, from fileURL: URL, as path: String, password: String? = nil) throws {
         let source = zip_source_file(za, cString(fileURL.path), 0, 0)
         guard let source = source else {
             throw LibzipError.failed(lastError(za))
@@ -267,7 +267,7 @@ extension Libzip {
         try addSourceToArchive(za, source: source, as: path, password: password)
     }
 
-    static func addDataToArchive(_ za: OpaquePointer, data: Data, as path: String, password: String? = nil, modified: Date? = nil) throws {
+    public static func addDataToArchive(_ za: OpaquePointer, data: Data, as path: String, password: String? = nil, modified: Date? = nil) throws {
         // zip_source_buffer does NOT copy the buffer: it reads from the pointer
         // when the archive is closed. Hand it malloc'd memory with freep=1 so
         // libzip owns (and later frees) a stable copy — a Swift Data buffer
@@ -286,7 +286,7 @@ extension Libzip {
         try addSourceToArchive(za, source: source, as: path, password: password, modified: modified)
     }
 
-    static func addDirectoryToArchive(_ za: OpaquePointer, path: String) throws {
+    public static func addDirectoryToArchive(_ za: OpaquePointer, path: String) throws {
         let name = cString(path)
         let index = name.withUnsafeBufferPointer { buf in
             zip_dir_add(za, buf.baseAddress!, 0)

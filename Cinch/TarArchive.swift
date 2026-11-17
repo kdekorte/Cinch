@@ -11,22 +11,29 @@ import Foundation
 import Compression
 
 /// One entry in a tar archive. Directory paths always end with "/".
-struct TarEntry: Equatable {
-    var path: String
-    var data: Data
-    var modificationDate: Date
-    var permissions: Int
+public struct TarEntry: Equatable {
+    public var path: String
+    public var data: Data
+    public var modificationDate: Date
+    public var permissions: Int
 
-    var isDirectory: Bool { path.hasSuffix("/") }
+    public var isDirectory: Bool { path.hasSuffix("/") }
+
+    public init(path: String, data: Data, modificationDate: Date, permissions: Int) {
+        self.path = path
+        self.data = data
+        self.modificationDate = modificationDate
+        self.permissions = permissions
+    }
 }
 
-enum TarArchiveError: Error, LocalizedError {
+public enum TarArchiveError: Error, LocalizedError {
     case notGzip
     case corruptGzip
     case corruptTar
     case compressionFailed
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .notGzip: return "The file is not a gzip archive."
         case .corruptGzip: return "The gzip stream is corrupt."
@@ -36,32 +43,32 @@ enum TarArchiveError: Error, LocalizedError {
     }
 }
 
-enum TarArchive {
+public enum TarArchive {
 
     // MARK: - Format detection
 
     /// Files Cinch treats as tar archives: .tar, .tar.gz, .tgz
-    static func isTarURL(_ url: URL) -> Bool {
+    public static func isTarURL(_ url: URL) -> Bool {
         let name = url.lastPathComponent.lowercased()
         return name.hasSuffix(".tar")
             || name.hasSuffix(".tgz")
             || name.hasSuffix(".tar.gz")
     }
 
-    static func isCompressedName(_ url: URL) -> Bool {
+    public static func isCompressedName(_ url: URL) -> Bool {
         let name = url.lastPathComponent.lowercased()
         return name.hasSuffix(".gz") || name.hasSuffix(".tgz")
     }
 
     // MARK: - Reading
 
-    static func read(url: URL) throws -> [TarEntry] {
+    public static func read(url: URL) throws -> [TarEntry] {
         let fileData = try Data(contentsOf: url)
         let tarData = try Gzip.isGzipData(fileData) ? Gzip.decompress(fileData) : fileData
         return try parse(tarData)
     }
 
-    static func parse(_ tar: Data) throws -> [TarEntry] {
+    public static func parse(_ tar: Data) throws -> [TarEntry] {
         var entries: [TarEntry] = []
         let blockSize = 512
         var offset = 0
@@ -113,13 +120,13 @@ extension TarArchive {
 
     // MARK: - Writing
 
-    static func write(_ entries: [TarEntry], to url: URL) throws {
+    public static func write(_ entries: [TarEntry], to url: URL) throws {
         let tarData = tarData(from: entries)
         let outData = isCompressedName(url) ? try Gzip.compress(tarData) : tarData
         try outData.write(to: url, options: .atomic)
     }
 
-    static func tarData(from entries: [TarEntry]) -> Data {
+    public static func tarData(from entries: [TarEntry]) -> Data {
         var out = Data()
         let blockSize = 512
 
