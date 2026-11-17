@@ -2,7 +2,7 @@
 
 Cinch is a native macOS archive browser and editor for **zip** and **tar / tar.gz** archives, built with SwiftUI and AppKit. It lets users open, browse, edit, extract, and create archives — including password-protected zips — in a Finder-style multi-column outline view, without dropping to the command line.
 
-- **Version**: 1.1 (from `MARKETING_VERSION` in `Cinch.xcodeproj/project.pbxproj`)
+- **Version**: 1.3 (from `MARKETING_VERSION` in `Cinch.xcodeproj/project.pbxproj`)
 - **License**: MIT © 2026 Kevin DeKorte
 - **Platform**: macOS only (AppKit-backed UI; non-macOS platforms compile a stub outline view)
 - **Sandboxing**: App Sandbox enabled, with read-write access to user-selected files and the Downloads folder
