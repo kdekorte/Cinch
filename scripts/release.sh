@@ -6,6 +6,13 @@
 #   scripts/release.sh              Show current version and status
 #   scripts/release.sh tag          Tag the current commit and push
 #   scripts/release.sh package      Build the distribution zip, pkg and source zip
+#   scripts/release.sh release      Create the GitHub release and upload artifacts
+#
+# Release notes: the release body comes from ReleaseNotes/v<version>.md when
+# that file exists (commit it with the version bump). Without it, notes are
+# generated into build/ with a Highlights placeholder plus the commit log
+# since the previous tag — you can also edit notes after the fact with:
+#   gh release edit v<version> --notes-file ReleaseNotes/v<version>.md
 #   scripts/release.sh release      Create GitHub release and upload assets
 #   scripts/release.sh cask         Update the Homebrew cask with the correct version and SHA256
 #   scripts/release.sh all          Run all steps: tag, release and cask update
@@ -130,12 +137,37 @@ do_release() {
         error "Package 'build/${SRC}' not found after build."
     fi
 
+    # Release notes: a curated file at ReleaseNotes/v<version>.md is used as
+    # the release body. Without one, notes are generated (a Highlights section
+    # to edit plus every commit since the previous tag) so a release is never
+    # published without notes.
+    NOTES="ReleaseNotes/${TAG}.md"
+    if [ ! -f "${NOTES}" ]; then
+        mkdir -p ReleaseNotes
+        GENERATED_NOTES="build/release-notes-${TAG}.md"
+        {
+            echo "## What's New in ${VERSION}"
+            echo
+            echo "<!-- Edit ReleaseNotes/${TAG}.md before releasing to curate these highlights. -->"
+            echo
+            echo "## Changes"
+            echo
+            if PREV_TAG=$(git describe --abbrev=0 --tags "${TAG}^" 2>/dev/null); then
+                git log --oneline --no-merges "${PREV_TAG}..${TAG}" | sed 's/^/- /'
+            else
+                git log --oneline --no-merges "${TAG}" | head -50 | sed 's/^/- /'
+            fi
+        } > "${GENERATED_NOTES}"
+        info "No curated notes at ${NOTES}; generated ${GENERATED_NOTES}"
+        NOTES="${GENERATED_NOTES}"
+    fi
+
     # Create the release and upload the assets
     info "Uploading ${ZIP}, ${PKG} and ${SRC} to release ${TAG}"
     gh release create "${TAG}" \
         --repo kdekorte/Cinch \
         --title "Cinch ${VERSION}" \
-        --generate-notes \
+        --notes-file "${NOTES}" \
         "build/${ZIP}" \
         "build/${PKG}" \
         "build/${SRC}"

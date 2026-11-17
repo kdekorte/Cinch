@@ -84,6 +84,12 @@ scripts/release.sh cask       # update Casks/cinch.rb version and SHA256
 scripts/release.sh all        # run tag, release and cask in sequence
 ```
 
+Release notes: write `ReleaseNotes/v<version>.md` and commit it with the version
+bump — it becomes the GitHub release body. Without one, the release is created
+with generated notes (a Highlights placeholder plus every commit since the
+previous tag), which you can curate afterwards with
+`gh release edit v<version> --notes-file ReleaseNotes/v<version>.md`.
+
 The zip is built with `ditto` (preserving signing metadata; used by the
 Homebrew cask), the `.pkg` with `pkgbuild` (installs to `/Applications`), and
 the source zip with `git archive` (from the release tag). The `cask` step
