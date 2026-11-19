@@ -45,12 +45,46 @@ brew untap kdekorte/cinch
 > **Note:** the cask downloads the release artifact attached to the
 > [GitHub releases](https://github.com/kdekorte/Cinch/releases) page, so it
 > requires a published release (see *Releasing* below).
+>
+> **Note:** if macOS reports that Cinch is "damaged" on first launch, see
+> [If macOS says Cinch is "damaged"](#if-macos-says-cinch-is-damaged-or-from-an-unidentified-developer)
+> for the one-line `xattr` workaround.
 
 ### Manual
 
 Download `Cinch-<version>.zip` from the
 [releases page](https://github.com/kdekorte/Cinch/releases), unzip it, and drag
 `Cinch.app` to `/Applications`.
+
+### If macOS says Cinch is "damaged" or from an unidentified developer
+
+Cinch is not signed with an Apple Developer ID certificate and is not
+notarized by Apple; it only carries an ad-hoc signature. When a file is
+downloaded (by a browser, `curl` via Homebrew, etc.) macOS tags it with a
+`com.apple.quarantine` attribute, and on first launch Gatekeeper checks
+quarantined apps for a Developer ID signature and notarization. Without them it
+may refuse to open the app with a message such as *"Cinch is damaged and can't
+be opened"* or *"Cinch can't be opened because Apple cannot check it for
+malicious software"*. The app is not actually corrupt; macOS is only reacting to
+the missing notarization.
+
+If you trust the download, remove the quarantine attribute and open the app
+again:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Cinch.app
+```
+
+(Use the app's real path if you installed it somewhere else.) You only need to
+do this once per download, so repeat it after each upgrade that reinstalls the
+app. Alternatively, for the "unidentified developer" prompt you can
+right-click `Cinch.app` in Finder, choose **Open**, then confirm.
+
+If the message persists, check that the app's signature is intact:
+
+```sh
+codesign --verify --deep --strict --verbose=2 /Applications/Cinch.app
+```
 
 ## Requirements
 
