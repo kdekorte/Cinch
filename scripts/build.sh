@@ -78,6 +78,14 @@ cp "$MCP_BIN" "$OUT_DIR/Cinch.app/Contents/MacOS/cinch-mcp"
 codesign --force --sign - --identifier com.kdekorte.Cinch.mcp-server \
   --timestamp=none "$OUT_DIR/Cinch.app/Contents/MacOS/cinch-mcp"
 
+# Adding the helper after Xcode signed the app invalidates the bundle's seal
+# (macOS then reports the app as "damaged" once it is quarantined). Re-sign the
+# outer bundle (not --deep, which would overwrite the helper's own signature),
+# keeping the entitlements and identifier Xcode applied.
+codesign --force --sign - --preserve-metadata=identifier,entitlements,flags \
+  --timestamp=none "$OUT_DIR/Cinch.app"
+codesign --verify --deep --strict --verbose=2 "$OUT_DIR/Cinch.app"
+
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
   "$OUT_DIR/Cinch.app/Contents/Info.plist" 2>/dev/null || echo 1.0)"
 
